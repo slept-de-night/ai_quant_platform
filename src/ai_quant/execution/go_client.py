@@ -104,3 +104,14 @@ class GoEngineClient:
             logger.debug(f"Go engine get_order_history failed: {e}")
         return None
 
+    def run_reconciliation(self) -> Optional[Dict[str, Any]]:
+        """Run broker reconciliation against OMS state."""
+        try:
+            r = self.session.post(f"{self.base_url}/api/v1/reconciliation/run", timeout=self.timeout)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            logger.debug(f"Go engine run_reconciliation failed: {e}")
+        return None
+
+

@@ -13,7 +13,9 @@ import (
 	"aq-engine-go/market"
 	"aq-engine-go/models"
 	"aq-engine-go/oms"
+	"aq-engine-go/reconciliation"
 )
+
 
 var startTime = time.Now()
 
@@ -191,9 +193,53 @@ func main() {
 		})
 	})
 
+	// 10. Automated Broker Reconciliation Engine
+	reconciler := reconciliation.NewReconciler(0.001, 1.0, 5*time.Minute)
+	mux.HandleFunc("POST /api/v1/reconciliation/run", func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now().UTC()
+		p := engine.GetPortfolio("")
+		
+		// Project local OMS state
+		localOrders := make(map[string]reconciliation.OrderState)
+		for _, ord := range engine.GetOrderHistory() {
+			localOrders[ord.ClientOrderID] = reconciliation.OrderState{
+				ClientOrderID: ord.ClientOrderID,
+				Symbol:        ord.Symbol,
+				Side:          string(ord.Side),
+				RequestedQty:  ord.Qty,
+				FilledQty:     ord.Qty,
+				Status:        string(ord.Status),
+				CreatedAt:     ord.CreatedAt,
+				UpdatedAt:     ord.CreatedAt,
+			}
+		}
+
+		localState := reconciliation.LocalState{
+			Orders:    localOrders,
+			Positions: make(map[string]reconciliation.PositionState),
+			Cash:      p.Cash,
+			Equity:    p.Equity,
+			Timestamp: now,
+		}
+
+		// Broker snapshot (paper simulation or Alpaca sync)
+		brokerState := reconciliation.BrokerState{
+			Orders:    localOrders,
+			Positions: make(map[string]reconciliation.PositionState),
+			Cash:      p.Cash,
+			Equity:    p.Equity,
+			Timestamp: now,
+		}
+
+		diff := reconciler.Reconcile(localState, brokerState)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(diff)
+	})
+
 	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
+
 

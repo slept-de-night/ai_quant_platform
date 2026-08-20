@@ -319,5 +319,12 @@ export const api = {
     if (!res.ok) throw new Error(`Order history error: ${res.statusText}`);
     return res.json();
   },
+
+  runReconciliation: async () => {
+    const res = await fetch(`${API_BASE}/reconciliation/run`, { method: 'POST' });
+    if (!res.ok) throw new Error(`Reconciliation error: ${res.statusText}`);
+    return res.json();
+  },
 };
+
 

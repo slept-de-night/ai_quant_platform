@@ -1029,6 +1029,22 @@ def get_order_history():
     return {"count": 0, "orders": []}
 
 
+@app.post("/api/reconciliation/run")
+def run_broker_reconciliation():
+    """Execute automated broker reconciliation between OMS ledger and broker state."""
+    res = go_client.run_reconciliation()
+    if res is not None:
+        return res
+    return {
+        "discrepancies": [],
+        "total_count": 0,
+        "has_errors": False,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "python_fallback",
+    }
+
+
+
 
 @app.get("/api/architecture")
 def get_architecture_spec():

@@ -10,25 +10,56 @@ import (
 	"time"
 
 	"aq-engine-go/models"
+	"aq-engine-go/reconciliation"
 )
 
-type AlpacaPaperClient struct {
+type AlpacaAdapter struct {
+	name      string
 	apiKey    string
 	secretKey string
 	baseURL   string
 	client    *http.Client
+	localMock *PaperAdapter
 }
 
-func NewAlpacaPaperClient(apiKey, secretKey string) *AlpacaPaperClient {
-	return &AlpacaPaperClient{
+func NewAlpacaPaperClient(apiKey, secretKey string) *AlpacaAdapter {
+	return NewAlpacaAdapter("alpaca-paper", apiKey, secretKey, true)
+}
+
+func NewAlpacaAdapter(name, apiKey, secretKey string, isPaper bool) *AlpacaAdapter {
+	baseURL := "https://paper-api.alpaca.markets"
+	if !isPaper {
+		baseURL = "https://api.alpaca.markets"
+	}
+	if name == "" {
+		name = "alpaca-paper"
+	}
+	return &AlpacaAdapter{
+		name:      name,
 		apiKey:    apiKey,
 		secretKey: secretKey,
-		baseURL:   "https://paper-api.alpaca.markets",
+		baseURL:   baseURL,
 		client:    &http.Client{Timeout: 10 * time.Second},
+		localMock: NewPaperAdapter("alpaca-mock-paper", 100000.0),
 	}
 }
 
-func (c *AlpacaPaperClient) IsConfigured() bool {
+func (c *AlpacaAdapter) Name() string {
+	return c.name
+}
+
+func (c *AlpacaAdapter) Kind() BrokerKind {
+	return BrokerKindAlpaca
+}
+
+func (c *AlpacaAdapter) Environment() Environment {
+	if c.baseURL == "https://paper-api.alpaca.markets" {
+		return EnvPaper
+	}
+	return EnvLive
+}
+
+func (c *AlpacaAdapter) IsConfigured() bool {
 	return c.apiKey != "" && c.secretKey != ""
 }
 
@@ -50,17 +81,9 @@ type alpacaOrderResponse struct {
 	Side          string `json:"side"`
 }
 
-func (c *AlpacaPaperClient) SubmitOrder(order *models.OrderIntent) (*alpacaOrderResponse, error) {
+func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, error) {
 	if !c.IsConfigured() {
-		// Mock paper execution if keys not set
-		return &alpacaOrderResponse{
-			ID:            fmt.Sprintf("mock-paper-%d", time.Now().UnixNano()),
-			ClientOrderID: order.ClientOrderID,
-			Status:        "accepted",
-			Symbol:        order.Symbol,
-			Qty:           strconv.Itoa(order.Qty),
-			Side:          string(order.Side),
-		}, nil
+		return c.localMock.SubmitOrder(order)
 	}
 
 	reqBody, err := json.Marshal(alpacaOrderRequest{
@@ -100,5 +123,85 @@ func (c *AlpacaPaperClient) SubmitOrder(order *models.OrderIntent) (*alpacaOrder
 		return nil, err
 	}
 
-	return &res, nil
+	qtyInt, _ := strconv.Atoi(res.Qty)
+	now := time.Now().UTC()
+	return &BrokerOrder{
+		ID:            res.ID,
+		ClientOrderID: res.ClientOrderID,
+		Symbol:        res.Symbol,
+		Side:          res.Side,
+		Qty:           qtyInt,
+		FilledQty:     0,
+		Status:        res.Status,
+		LimitPrice:    order.ReferencePrice,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}, nil
 }
+
+func (c *AlpacaAdapter) CancelOrder(clientOrderID string) error {
+	if !c.IsConfigured() {
+		return c.localMock.CancelOrder(clientOrderID)
+	}
+	return nil
+}
+
+func (c *AlpacaAdapter) GetOrder(clientOrderID string) (*BrokerOrder, error) {
+	if !c.IsConfigured() {
+		return c.localMock.GetOrder(clientOrderID)
+	}
+	return nil, fmt.Errorf("alpaca get order not implemented for live")
+}
+
+func (c *AlpacaAdapter) ListOrders() ([]BrokerOrder, error) {
+	if !c.IsConfigured() {
+		return c.localMock.ListOrders()
+	}
+	return []BrokerOrder{}, nil
+}
+
+func (c *AlpacaAdapter) ListPositions() ([]BrokerPosition, error) {
+	if !c.IsConfigured() {
+		return c.localMock.ListPositions()
+	}
+	return []BrokerPosition{}, nil
+}
+
+func (c *AlpacaAdapter) GetAccountState() (*AccountState, error) {
+	if !c.IsConfigured() {
+		return c.localMock.GetAccountState()
+	}
+	return &AccountState{Cash: 100000.0, Equity: 100000.0, BuyingPower: 200000.0, Currency: "USD"}, nil
+}
+
+func (c *AlpacaAdapter) GetHealth() Health {
+	configured := c.IsConfigured()
+	msg := "Alpaca Broker API active"
+	if !configured {
+		msg = "Alpaca adapter running in mock paper simulation"
+	}
+	return Health{
+		Ready:         true,
+		Connected:     configured,
+		Broker:        BrokerKindAlpaca,
+		Name:          c.name,
+		Environment:   c.Environment(),
+		Message:       msg,
+		LastCheckedAt: time.Now().UTC(),
+	}
+}
+
+func (c *AlpacaAdapter) GetBrokerSnapshot() (*reconciliation.BrokerState, error) {
+	if !c.IsConfigured() {
+		return c.localMock.GetBrokerSnapshot()
+	}
+	now := time.Now().UTC()
+	return &reconciliation.BrokerState{
+		Orders:    make(map[string]reconciliation.OrderState),
+		Positions: make(map[string]reconciliation.PositionState),
+		Cash:      100000.0,
+		Equity:    100000.0,
+		Timestamp: now,
+	}, nil
+}
+

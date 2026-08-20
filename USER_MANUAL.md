@@ -16,10 +16,12 @@ Welcome to the **AI Quant Platform v1.3 Enterprise Workstation**. This platform 
    - [Forex Workspace](#forex-workspace)
 4. [Point-in-Time (PIT) Quant Runtime & Anti-Lookahead Fabric](#4-point-in-time-pit-quant-runtime--anti-lookahead-fabric)
 5. [Go Execution Core, Pre-Trade Risk & Kill Switch](#5-go-execution-core-pre-trade-risk--kill-switch)
-6. [Automated Broker Reconciliation Engine](#6-automated-broker-reconciliation-engine)
-7. [Multi-Agent Research DAG & Evidence Falsification](#7-multi-agent-research-dag--evidence-falsification)
-8. [Workstation UI Navigation](#8-workstation-ui-navigation)
-9. [API & Verification Reference](#9-api--verification-reference)
+6. [Pluggable Multi-Broker Architecture & Extensions](#6-pluggable-multi-broker-architecture--extensions)
+7. [Automated Broker Reconciliation Engine](#7-automated-broker-reconciliation-engine)
+8. [Multi-Agent Research DAG & Evidence Falsification](#8-multi-agent-research-dag--evidence-falsification)
+9. [Workstation UI Navigation](#9-workstation-ui-navigation)
+10. [API & Verification Reference](#10-api--verification-reference)
+
 
 ---
 
@@ -165,7 +167,89 @@ Every order intent and execution event carries a persistent `trace_id`, `run_id`
 
 ---
 
-## 6. Automated Broker Reconciliation Engine
+## 6. Pluggable Multi-Broker Architecture & Extensions
+
+The platform features an extensible **Broker Adapter Framework** (`services/aq-engine-go/broker/`), allowing seamless plug-and-play execution across different brokerages:
+
+```
+                      ┌────────────────────────┐
+                      │    Pre-Trade Risk OMS  │
+                      └───────────┬────────────┘
+                                  │ (Approved Order)
+                                  ▼
+                      ┌────────────────────────┐
+                      │     Broker Registry    │
+                      └───────────┬────────────┘
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         ▼                        ▼                        ▼
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│   Webull (Main)  │    │   Alpaca Paper   │    │  Paper Simulator │
+│  OpenAPI Adapter │    │   REST/WS Client │    │  Instant Fill    │
+└──────────────────┘    └──────────────────┘    └──────────────────┘
+```
+
+### Supported Execution Venues
+
+1. **Webull (`webull-main`)** — *Default Active Venue*:
+   - Uses Webull OpenAPI for market & limit order placement, position queries, and account state.
+   - Configured via environment variables:
+     - `WEBULL_APP_KEY`: Your Webull OpenAPI App Key
+     - `WEBULL_APP_SECRET`: Your Webull OpenAPI App Secret
+     - `WEBULL_ACCOUNT_ID`: Your Webull Account ID
+   - Falls back safely to sandbox simulation if credentials are not set.
+
+2. **Alpaca Paper (`alpaca-paper`)**:
+   - Uses Alpaca Paper Trading API.
+   - Configured via `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`.
+
+3. **Paper Simulator (`paper-simulation`)**:
+   - High-speed in-memory deterministic simulation engine with zero network overhead.
+
+### Switching Brokers Dynamically
+
+- **From the UI**: Select your desired venue from the **BROKER** dropdown in the top navigation bar.
+- **Via API**:
+  ```bash
+  # List all available broker adapters
+  curl http://localhost:8000/api/brokers
+
+  # Switch active execution venue to Webull
+  curl -X POST http://localhost:8000/api/brokers/select \
+    -H "Content-Type: application/json" \
+    -d '{"name": "webull-main"}'
+  ```
+
+### Adding a Custom Broker Adapter (Plug-and-Play Extension)
+
+To add another trading platform (e.g. Interactive Brokers, Tradier, Binance), implement the standard `BrokerAdapter` Go interface in `services/aq-engine-go/broker/`:
+
+```go
+type BrokerAdapter interface {
+    Name() string
+    Kind() BrokerKind
+    Environment() Environment
+    IsConfigured() bool
+
+    SubmitOrder(order *models.OrderIntent) (*BrokerOrder, error)
+    CancelOrder(clientOrderID string) error
+    GetOrder(clientOrderID string) (*BrokerOrder, error)
+    ListOrders() ([]BrokerOrder, error)
+    ListPositions() ([]BrokerPosition, error)
+    GetAccountState() (*AccountState, error)
+    GetHealth() Health
+    GetBrokerSnapshot() (*reconciliation.BrokerState, error)
+}
+```
+
+Register your new adapter in `services/aq-engine-go/main.go`:
+```go
+brokerReg.Register(NewCustomBrokerAdapter("custom-broker", apiKey, apiSecret))
+```
+
+---
+
+## 7. Automated Broker Reconciliation Engine
 
 Located in `services/aq-engine-go/reconciliation/reconciler.go`, this subsystem continuously verifies that the local OMS state matches broker reality:
 
@@ -178,6 +262,8 @@ Located in `services/aq-engine-go/reconciliation/reconciler.go`, this subsystem 
 | `FILL_QTY_MISMATCH` | Cumulative fill quantity difference | Reconciles position quantity |
 | `POSITION_MISMATCH` | Position delta exceeds `QtyTolerance` | Triggers position adjustment |
 | `CASH_MISMATCH` | Cash balance delta exceeds `CashTolerance` | Flags cash ledger discrepancy |
+| `STALE_LOCAL_ORDER` | Local status has not updated after `StaleAfter` | Synchronizes status with broker truth |
+
 | `STALE_LOCAL_ORDER` | Local status has not updated after `StaleAfter` | Synchronizes status with broker truth |
 
 ---

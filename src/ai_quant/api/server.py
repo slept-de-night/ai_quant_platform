@@ -1044,6 +1044,36 @@ def run_broker_reconciliation():
     }
 
 
+@app.get("/api/brokers")
+
+def list_available_brokers():
+    """List all registered pluggable broker adapters and their health."""
+    res = go_client.list_brokers()
+    if res is not None:
+        return res
+    return {
+        "active": "webull-main",
+        "brokers": [
+            {"name": "webull-main", "broker": "webull", "environment": "paper", "ready": True},
+            {"name": "alpaca-paper", "broker": "alpaca", "environment": "paper", "ready": True},
+            {"name": "paper-simulation", "broker": "paper", "environment": "simulation", "ready": True},
+        ],
+    }
+
+
+@app.post("/api/brokers/select")
+def select_execution_broker(payload: Dict[str, str]):
+    """Select the active broker adapter for execution."""
+    name = payload.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Broker name is required")
+    res = go_client.select_broker(name)
+    if res is not None:
+        return res
+    return {"status": "selected", "active": name, "mode": "fallback"}
+
+
+
 
 
 @app.get("/api/architecture")

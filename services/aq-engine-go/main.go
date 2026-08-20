@@ -34,12 +34,24 @@ func main() {
 
 	alpacaKey := os.Getenv("ALPACA_API_KEY")
 	alpacaSecret := os.Getenv("ALPACA_SECRET_KEY")
+	webullKey := os.Getenv("WEBULL_APP_KEY")
+	webullSecret := os.Getenv("WEBULL_APP_SECRET")
+	webullAccount := os.Getenv("WEBULL_ACCOUNT_ID")
 
 	// Initialize subsystems
 	riskCfg := models.DefaultRiskConfig()
 	engine := oms.NewEngine(initialEquity, riskCfg)
 	gateway := market.NewGateway()
-	alpacaBroker := broker.NewAlpacaPaperClient(alpacaKey, alpacaSecret)
+
+	// Initialize Pluggable Broker Registry
+	brokerReg := broker.NewRegistry()
+	paperAdapter := broker.NewPaperAdapter("paper-simulation", initialEquity)
+	webullAdapter := broker.NewWebullAdapter("webull-main", webullKey, webullSecret, webullAccount, true)
+	alpacaAdapter := broker.NewAlpacaAdapter("alpaca-paper", alpacaKey, alpacaSecret, true)
+
+	brokerReg.Register(webullAdapter) // default main
+	brokerReg.Register(alpacaAdapter)
+	brokerReg.Register(paperAdapter)
 
 	// Seed some baseline market ticks
 	gateway.PublishTick(models.MarketTick{Symbol: "SPY", Price: 512.45, Volume: 4500000, Timestamp: time.Now().UTC()})
@@ -50,18 +62,25 @@ func main() {
 
 	// 1. Health & Diagnostics
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		activeB, _ := brokerReg.GetActive()
+		activeHealth := broker.Health{}
+		if activeB != nil {
+			activeHealth = activeB.GetHealth()
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":            "healthy",
-			"engine":            "aq-engine-go",
-			"version":           "1.2.0-core",
-			"uptime_seconds":    time.Since(startTime).Seconds(),
-			"alpaca_configured": alpacaBroker.IsConfigured(),
-			"execution_mode":    "PAPER_ONLY",
-			"is_frozen":         engine.IsFrozen(),
+			"status":         "healthy",
+			"engine":         "aq-engine-go",
+			"version":        "1.3.0-enterprise",
+			"uptime_seconds": time.Since(startTime).Seconds(),
+			"active_broker":  activeHealth.Name,
+			"broker_kind":    activeHealth.Broker,
+			"execution_mode": activeHealth.Environment,
+			"is_frozen":      engine.IsFrozen(),
+			"brokers":        brokerReg.List(),
 		})
 	})
-
 
 	// 2. Portfolio State
 	mux.HandleFunc("GET /api/v1/portfolio", func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +105,7 @@ func main() {
 		json.NewEncoder(w).Encode(decision)
 	})
 
-	// 4. Order Execution (Risk Check + Alpaca Paper Submit)
+	// 4. Order Execution (Risk Check + Pluggable Broker Submit)
 	mux.HandleFunc("POST /api/v1/orders/submit", func(w http.ResponseWriter, r *http.Request) {
 		var order models.OrderIntent
 		if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
@@ -105,8 +124,14 @@ func main() {
 			return
 		}
 
-		// Dispatch to Alpaca Paper Broker
-		resp, err := alpacaBroker.SubmitOrder(&order)
+		// Dispatch to Active Pluggable Broker Adapter (Webull / Alpaca / Paper)
+		activeBroker, err := brokerReg.GetActive()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		resp, err := activeBroker.SubmitOrder(&order)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -122,6 +147,7 @@ func main() {
 			"submitted":       true,
 			"decision":        decision,
 			"broker_response": resp,
+			"broker_name":     activeBroker.Name(),
 		})
 	})
 
@@ -160,7 +186,6 @@ func main() {
 	})
 
 	// 7. Emergency Global Kill Switch
-
 	mux.HandleFunc("POST /api/v1/risk/kill", func(w http.ResponseWriter, r *http.Request) {
 		engine.Freeze()
 		w.Header().Set("Content-Type", "application/json")
@@ -222,18 +247,58 @@ func main() {
 			Timestamp: now,
 		}
 
-		// Broker snapshot (paper simulation or Alpaca sync)
-		brokerState := reconciliation.BrokerState{
-			Orders:    localOrders,
-			Positions: make(map[string]reconciliation.PositionState),
-			Cash:      p.Cash,
-			Equity:    p.Equity,
-			Timestamp: now,
+		activeB, err := brokerReg.GetActive()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		diff := reconciler.Reconcile(localState, brokerState)
+		brokerSnapshot, err := activeB.GetBrokerSnapshot()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to get broker snapshot: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		diff := reconciler.Reconcile(localState, *brokerSnapshot)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(diff)
+	})
+
+	// 11. Pluggable Broker Management Endpoints
+	mux.HandleFunc("GET /api/v1/brokers", func(w http.ResponseWriter, r *http.Request) {
+		activeB, _ := brokerReg.GetActive()
+		activeName := ""
+		if activeB != nil {
+			activeName = activeB.Name()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"active":  activeName,
+			"brokers": brokerReg.List(),
+		})
+	})
+
+	mux.HandleFunc("POST /api/v1/brokers/select", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := brokerReg.SetActive(req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		activeB, _ := brokerReg.GetActive()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "selected",
+			"active": activeB.Name(),
+			"health": activeB.GetHealth(),
+		})
 	})
 
 	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
@@ -241,5 +306,6 @@ func main() {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
+
 
 

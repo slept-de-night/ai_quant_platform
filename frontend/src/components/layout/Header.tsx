@@ -12,7 +12,9 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  ArrowRight
+  ArrowRight,
+  Server,
+  Zap,
 } from 'lucide-react';
 import { HeaderSearchAutocomplete } from '../../features/market/HeaderSearchAutocomplete';
 
@@ -42,6 +44,31 @@ export const Header: React.FC<HeaderProps> = ({
   const [time, setTime] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
+  const [activeBroker, setActiveBroker] = useState<string>('webull-main');
+
+  useEffect(() => {
+    // Sync active broker from platform status or API
+    const fetchBrokers = async () => {
+      try {
+        const res = await api.listBrokers();
+        if (res?.active) setActiveBroker(res.active);
+      } catch (e) {
+        // fallback
+      }
+    };
+    fetchBrokers();
+  }, [status]);
+
+  const handleBrokerChange = async (newBroker: string) => {
+    try {
+      setActiveBroker(newBroker);
+      await api.selectBroker(newBroker);
+      onRefresh();
+    } catch (e) {
+      console.error('Failed to switch broker:', e);
+    }
+  };
+
 
   useEffect(() => {
     const updateTime = () => {
@@ -155,6 +182,21 @@ export const Header: React.FC<HeaderProps> = ({
             <strong className="text-accent-cyan font-bold">{selectedSymbol}</strong>
           </div>
 
+          {/* Pluggable Broker Venue Selector */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-background border border-card-border font-mono text-xs">
+            <Server className="w-3.5 h-3.5 text-accent-blue" />
+            <span className="text-slate-400 text-[10px] hidden md:inline">BROKER:</span>
+            <select
+              value={activeBroker}
+              onChange={(e) => handleBrokerChange(e.target.value)}
+              className="bg-card border border-card-border text-slate-200 text-xs rounded px-1.5 py-0.5 font-bold focus:outline-none focus:border-accent-cyan cursor-pointer"
+            >
+              <option value="webull-main">Webull (Main)</option>
+              <option value="alpaca-paper">Alpaca Paper</option>
+              <option value="paper-simulation">Paper Sim</option>
+            </select>
+          </div>
+
           {/* Emergency Kill Switch / Freeze State */}
           <button
             onClick={async () => {
@@ -187,6 +229,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="text-slate-300">GO ENGINE:</span>
             <span className="text-accent-emerald font-bold">{status?.go_engine?.status || 'ONLINE'}</span>
           </div>
+
 
           {/* Clock */}
           <div className="hidden xl:flex items-center gap-1.5 text-slate-400 text-xs font-mono">

@@ -114,4 +114,25 @@ class GoEngineClient:
             logger.debug(f"Go engine run_reconciliation failed: {e}")
         return None
 
+    def list_brokers(self) -> Optional[Dict[str, Any]]:
+        """List all pluggable broker adapters and their health."""
+        try:
+            r = self.session.get(f"{self.base_url}/api/v1/brokers", timeout=self.timeout)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            logger.debug(f"Go engine list_brokers failed: {e}")
+        return None
+
+    def select_broker(self, name: str) -> Optional[Dict[str, Any]]:
+        """Dynamically switch the active execution broker."""
+        try:
+            r = self.session.post(f"{self.base_url}/api/v1/brokers/select", json={"name": name}, timeout=self.timeout)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            logger.debug(f"Go engine select_broker failed: {e}")
+        return None
+
+
 

@@ -325,6 +325,23 @@ export const api = {
     if (!res.ok) throw new Error(`Reconciliation error: ${res.statusText}`);
     return res.json();
   },
+
+  listBrokers: async () => {
+    const res = await fetch(`${API_BASE}/brokers`);
+    if (!res.ok) throw new Error(`List brokers error: ${res.statusText}`);
+    return res.json();
+  },
+
+  selectBroker: async (name: string) => {
+    const res = await fetch(`${API_BASE}/brokers/select`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(`Select broker error: ${res.statusText}`);
+    return res.json();
+  },
 };
+
 
 

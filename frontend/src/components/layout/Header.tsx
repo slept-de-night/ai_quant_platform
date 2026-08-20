@@ -123,8 +123,9 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* Main Navigation & Search Bar */}
-      <div className="flex items-center justify-between h-14 px-4 bg-card/60 backdrop-blur-md gap-4">
+      <div className="flex items-center justify-between h-16 px-4 bg-card/60 backdrop-blur-md gap-4">
         {/* Brand & Sidebar Toggle */}
+
         <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={onToggleSidebar}
@@ -149,18 +150,18 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="flex items-center gap-2">
                 <span className="font-bold text-sm text-slate-100 tracking-wide">AI QUANT PLATFORM</span>
                 <span className="px-1.5 py-0.5 text-[9px] font-mono font-semibold bg-accent-blue/20 text-accent-cyan border border-accent-blue/30 rounded">
-                  v1.2 ENTERPRISE
+                  v1.3 ENTERPRISE
                 </span>
               </div>
               <div className="text-[10px] text-slate-400 font-mono hidden md:block">
-                Multi-Agent DAG & Go Execution
+                Multi-Agent DAG & Go Execution Core
               </div>
             </div>
           </div>
         </div>
 
-        {/* Global Cross-Asset Search & Autocomplete Bar */}
-        <div className="flex-1 max-w-lg mx-2">
+        {/* Global Cross-Asset Search & Autocomplete Bar (Expanded & Prominent) */}
+        <div className="flex-1 max-w-2xl mx-4">
           <HeaderSearchAutocomplete
             onSelect={async (item) => {
               try {
@@ -172,6 +173,7 @@ export const Header: React.FC<HeaderProps> = ({
             }}
           />
         </div>
+
 
 
         {/* System Health & Status Indicators */}

@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Callable, Dict, List
+
+from ..core.config import Settings
+from ..intelligence.evidence import verify_evidence
+from ..intelligence.fundamentals import SECCompanyFactsClient, analyze_fundamental
+from ..intelligence.models import ConflictBatch
+from ..intelligence.technical import analyze_technical
+from ..intelligence.trends import FREDClient, analyze_megatrend, analyze_microtrend
+from ..intelligence.web_research import OpenAIWebResearcher
+from .models import RuntimeTask
+from .router import ModelRouter, RouteRequest
+
+
+class ResearchRuntimeHandlers:
+    """Executable handlers for the quantitative multi-agent research DAG."""
+
+    def __init__(self, cfg: Settings, data_loader: Callable[[str, int], Any], execute_ai: bool = False):
+        self.cfg = cfg
+        self.data_loader = data_loader
+        self.execute_ai = execute_ai
+        self.router = ModelRouter(cfg)
+
+    def handlers(self) -> Dict[str, Callable[[RuntimeTask, Dict[str, Dict[str, Any]]], Dict[str, Any]]]:
+        return {
+            "extract": self.extract,
+            "fundamental_review": self.fundamental,
+            "trend_review": self.trend,
+            "web_research": self.web_research,
+            "contradiction": self.contradiction,
+            "scenario_synthesis": self.scenario,
+            "falsification": self.falsification,
+            "critical_review": self.audit,
+            "research_digest": self.digest,
+            "research_program": self.digest,
+        }
+
+    @staticmethod
+    def _clean_deps(deps: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [v for _, v in sorted(deps.items())]
+
+    def extract(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        bars = self.data_loader(task.symbol or "SPY", 1000)
+        view = analyze_technical(bars)
+        return {"agent": task.agent_role, "kind": "technical", "view": view.model_dump(mode="json")}
+
+    def fundamental(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        if not self.cfg.sec_user_agent or not task.symbol:
+            view = analyze_fundamental(None)
+        else:
+            try:
+                snap = SECCompanyFactsClient(self.cfg.sec_user_agent).snapshot(task.symbol)
+                view = analyze_fundamental(snap)
+            except Exception as exc:
+                view = analyze_fundamental(None)
+                view.observations.append(f"SEC unavailable: {type(exc).__name__}: {exc}")
+        return {"agent": task.agent_role, "kind": "fundamental", "view": view.model_dump(mode="json")}
+
+    def trend(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        symbol_bars = self.data_loader(task.symbol or "SPY", 1000)
+        market = self.data_loader("SPY", 1000)
+        if task.agent_role == "microtrend_agent":
+            view = analyze_microtrend(symbol_bars, None, market)
+            return {"agent": task.agent_role, "kind": "microtrend", "view": view.model_dump(mode="json")}
+        growth = self.data_loader("QQQ", 1000)
+        bond = self.data_loader("TLT", 1000)
+        gold = self.data_loader("GLD", 1000)
+        macro = None
+        if self.cfg.fred_api_key:
+            try:
+                macro = FREDClient(self.cfg.fred_api_key).snapshot()
+            except Exception:
+                macro = None
+        view = analyze_megatrend(market, growth, bond, gold, macro)
+        return {"agent": task.agent_role, "kind": "megatrend", "view": view.model_dump(mode="json")}
+
+    def web_research(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        if task.agent_role == "evidence_manager":
+            return self.digest(task, deps)
+        if not self.execute_ai or not self.cfg.openai_api_key or not task.symbol:
+            return {
+                "agent": task.agent_role,
+                "kind": "evidence",
+                "summary": "AI web research not executed in this runtime run.",
+                "evidence": {"overall_trust": 0.0, "verified_claim_ratio": 0.0, "claims": []},
+                "skipped": True,
+            }
+        req = RouteRequest(
+            task_type="web_research",
+            complexity=0.68,
+            criticality=0.78,
+            ambiguity=0.70,
+            financial_impact=0.55,
+            needs_web=True,
+            needs_tools=True,
+            run_id=task.root_id,
+        )
+        route = self.router.decide(req)
+        primary = {x.strip().lower() for x in self.cfg.extra_primary_domains.split(",") if x.strip()}
+        trusted = {x.strip().lower() for x in self.cfg.extra_trusted_domains.split(",") if x.strip()}
+        researcher = OpenAIWebResearcher(
+            self.cfg.openai_api_key, route.model, route.reasoning_effort, primary, trusted
+        )
+        summary, items = researcher.research(task.symbol)
+        report = verify_evidence(items)
+        return {
+            "agent": task.agent_role,
+            "kind": "evidence",
+            "summary": summary,
+            "route": route.model_dump(mode="json"),
+            "evidence": report.model_dump(mode="json"),
+            "skipped": False,
+        }
+
+    def contradiction(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        evidence_outputs = self._clean_deps(deps)
+        claims = []
+        for out in evidence_outputs:
+            report = out.get("evidence", {})
+            for claim in report.get("claims", []):
+                claims.append({"claim": claim.get("claim"), "verdict": claim.get("verdict")})
+        if len(claims) < 2:
+            return {"agent": task.agent_role, "kind": "contradiction", "conflicts": [], "note": "insufficient claims"}
+        if not self.execute_ai or not self.cfg.openai_api_key:
+            return {
+                "agent": task.agent_role,
+                "kind": "contradiction",
+                "conflicts": [],
+                "note": "AI contradiction pass skipped",
+            }
+
+        response, route = self.router.parse(
+            RouteRequest(
+                task_type="contradiction",
+                complexity=0.55,
+                criticality=0.82,
+                ambiguity=0.60,
+                financial_impact=0.55,
+                run_id=task.root_id,
+            ),
+            input=[
+                {
+                    "role": "system",
+                    "content": "Find only direct material contradictions in sanitized financial claims. Do not invent facts.",
+                },
+                {"role": "user", "content": json.dumps(claims)},
+            ],
+            text_format=ConflictBatch,
+        )
+        batch = response.output_parsed
+        return {
+            "agent": task.agent_role,
+            "kind": "contradiction",
+            "route": route.model_dump(mode="json"),
+            "conflicts": batch.model_dump(mode="json")["conflicts"] if batch else [],
+        }
+
+    def scenario(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        inputs = self._clean_deps(deps)
+        if task.agent_role == "future_agent":
+            return {
+                "agent": task.agent_role,
+                "kind": "future_scenarios",
+                "scenarios": [
+                    {
+                        "name": "base",
+                        "thesis": "Current verified conditions broadly persist.",
+                        "invalidators": ["material trend or evidence regime change"],
+                    },
+                    {
+                        "name": "upside",
+                        "thesis": "Company/industry and macro conditions improve together.",
+                        "invalidators": ["growth or leadership fails to confirm"],
+                    },
+                    {
+                        "name": "downside",
+                        "thesis": "Company, industry, or macro conditions deteriorate materially.",
+                        "invalidators": ["fundamentals and relative strength re-accelerate"],
+                    },
+                ],
+                "inputs_seen": len(inputs),
+            }
+        return {"agent": task.agent_role, "kind": "thesis_digest", "components": inputs}
+
+    def falsification(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "agent": task.agent_role,
+            "kind": "falsification",
+            "tests": [
+                "relative leadership reverses on 60/120-day horizons",
+                "fundamental growth/profitability deteriorates",
+                "verified evidence contradicts the central narrative",
+                "macro regime changes materially",
+            ],
+            "inputs_seen": len(deps),
+        }
+
+    def audit(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        items = self._clean_deps(deps)
+        skipped = 0
+        warnings = []
+        for item in items:
+            if item.get("skipped"):
+                skipped += 1
+            if "error" in item:
+                warnings.append(str(item["error"]))
+        return {
+            "agent": task.agent_role,
+            "kind": "audit",
+            "dependency_count": len(items),
+            "skipped_components": skipped,
+            "warnings": warnings,
+            "passed_structure": len(items) > 0 and not warnings,
+        }
+
+    def digest(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        items = self._clean_deps(deps)
+        return {
+            "agent": task.agent_role,
+            "kind": "digest",
+            "objective": task.objective,
+            "dependency_count": len(items),
+            "components": items,
+        }

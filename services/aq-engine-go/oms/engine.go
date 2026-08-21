@@ -17,6 +17,9 @@ type Engine struct {
 	config       models.RiskConfig
 	orderHistory map[string]models.OrderIntent
 	orderList    []models.OrderIntent
+	fills        map[string]models.Fill     // fill_id -> Fill (idempotency ledger)
+	fillList     []models.Fill
+	positions    map[string]models.Position // confirmed fill position projection
 	dailyOrders  int
 	lastResetDay string
 	isFrozen     bool
@@ -38,6 +41,9 @@ func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
 		config:       cfg,
 		orderHistory: make(map[string]models.OrderIntent),
 		orderList:    make([]models.OrderIntent, 0),
+		fills:        make(map[string]models.Fill),
+		fillList:     make([]models.Fill, 0),
+		positions:    make(map[string]models.Position),
 		lastResetDay: time.Now().UTC().Format("2006-01-02"),
 		isFrozen:     false,
 	}
@@ -70,6 +76,12 @@ func (e *Engine) GetPortfolio(symbol string) models.PortfolioState {
 	p := e.portfolio
 	p.OrdersToday = e.dailyOrders
 	p.IsFrozen = e.isFrozen
+	if symbol != "" {
+		if pos, ok := e.positions[symbol]; ok {
+			p.CurrentSymbolQty = pos.Qty
+			p.CurrentSymbolExposure = pos.MarketValue
+		}
+	}
 	return p
 }
 
@@ -88,6 +100,141 @@ func (e *Engine) GetOrderByClientID(clientOrderID string) (models.OrderIntent, b
 
 	ord, exists := e.orderHistory[clientOrderID]
 	return ord, exists
+}
+
+func (e *Engine) GetPositions() []models.Position {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var list []models.Position
+	for _, p := range e.positions {
+		if p.Qty != 0 {
+			list = append(list, p)
+		}
+	}
+	return list
+}
+
+func (e *Engine) GetPosition(symbol string) (models.Position, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	p, exists := e.positions[symbol]
+	return p, exists
+}
+
+func (e *Engine) GetFills() []models.Fill {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	out := make([]models.Fill, len(e.fillList))
+	copy(out, e.fillList)
+	return out
+}
+
+func (e *Engine) GetFillsByClientOrderID(clientOrderID string) []models.Fill {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var out []models.Fill
+	for _, f := range e.fillList {
+		if f.ClientOrderID == clientOrderID {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// ApplyFill records a fill idempotently and derives updated position/cash states strictly from confirmed fills.
+func (e *Engine) ApplyFill(fill models.Fill) (*models.Position, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if fill.FillID == "" {
+		return nil, errors.New("fill_id cannot be empty")
+	}
+
+	// 1. Idempotency check: if fill already processed, return current position
+	if _, exists := e.fills[fill.FillID]; exists {
+		pos := e.positions[fill.Symbol]
+		return &pos, nil
+	}
+
+	if fill.Timestamp.IsZero() {
+		fill.Timestamp = time.Now().UTC()
+	}
+
+	// 2. Record fill in ledger
+	e.fills[fill.FillID] = fill
+	e.fillList = append(e.fillList, fill)
+
+	// 3. Update OrderIntent in history
+	if ord, exists := e.orderHistory[fill.ClientOrderID]; exists {
+		prevFilledQty := ord.FilledQtyFloat
+		prevCost := prevFilledQty * ord.AverageFillPrice
+		newFilledQty := prevFilledQty + fill.Qty
+		newCost := prevCost + (fill.Qty * fill.Price)
+
+		ord.FilledQty = int(newFilledQty)
+		ord.FilledQtyFloat = newFilledQty
+		if newFilledQty > 0 {
+			ord.AverageFillPrice = newCost / newFilledQty
+		}
+		if ord.BrokerOrderID == "" && fill.BrokerOrderID != "" {
+			ord.BrokerOrderID = fill.BrokerOrderID
+		}
+
+		targetQty := float64(ord.Qty)
+		if ord.RequestedQty > 0 {
+			targetQty = ord.RequestedQty
+		}
+
+		if newFilledQty >= targetQty {
+			ord.Status = models.OrderStatusFilled
+		} else if newFilledQty > 0 {
+			ord.Status = models.OrderStatusPartiallyFilled
+		}
+		ord.UpdatedAt = fill.Timestamp
+
+		e.orderHistory[fill.ClientOrderID] = ord
+		for i := range e.orderList {
+			if e.orderList[i].ClientOrderID == fill.ClientOrderID {
+				e.orderList[i] = ord
+				break
+			}
+		}
+	}
+
+	// 4. Update Position Projection from confirmed fill
+	pos := e.positions[fill.Symbol]
+	pos.Symbol = fill.Symbol
+
+	if fill.Side == models.SideBuy {
+		pos.Qty += fill.Qty
+		pos.CostBasis += fill.Qty * fill.Price
+		pos.MarketValue = pos.Qty * fill.Price
+		e.portfolio.Cash -= fill.Qty * fill.Price
+	} else if fill.Side == models.SideSell {
+		pos.Qty -= fill.Qty
+		pos.MarketValue = pos.Qty * fill.Price
+		e.portfolio.Cash += fill.Qty * fill.Price
+	}
+	e.positions[fill.Symbol] = pos
+
+	// 5. Update portfolio aggregates
+	var totalGross float64
+	var totalPosVal float64
+	for _, p := range e.positions {
+		totalGross += math.Abs(p.MarketValue)
+		totalPosVal += p.MarketValue
+	}
+	e.portfolio.GrossExposure = totalGross
+	e.portfolio.Equity = e.portfolio.Cash + totalPosVal
+	if e.portfolio.Equity > e.portfolio.PeakEquity {
+		e.portfolio.PeakEquity = e.portfolio.Equity
+	}
+
+	return &pos, nil
 }
 
 func (e *Engine) UpdateOrderStatus(clientOrderID string, status models.OrderStatus, reasons ...string) {

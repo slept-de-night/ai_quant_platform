@@ -31,24 +31,47 @@ const (
 )
 
 type OrderIntent struct {
-	Symbol          string      `json:"symbol"`
-	StrategyName    string      `json:"strategy_name"`
-	Side            Side        `json:"side"`
-	Qty             int         `json:"qty"`
-	ReferencePrice  float64     `json:"reference_price"`
-	Notional        float64     `json:"notional"`
-	ClientOrderID   string      `json:"client_order_id"`
-	BrokerOrderID   string      `json:"broker_order_id,omitempty"`
-	TraceID         string      `json:"trace_id,omitempty"`
-	RunID           string      `json:"run_id,omitempty"`
-	DecisionID      string      `json:"decision_id,omitempty"`
-	SnapshotID      string      `json:"snapshot_id,omitempty"`
-	StrategyID      string      `json:"strategy_id,omitempty"`
-	StrategyVersion string      `json:"strategy_version,omitempty"`
-	DatasetVersion  string      `json:"dataset_version,omitempty"`
-	Status          OrderStatus `json:"status,omitempty"`
-	Reason          string      `json:"reason"`
-	CreatedAt       time.Time   `json:"created_at"`
+	Symbol           string      `json:"symbol"`
+	StrategyName     string      `json:"strategy_name"`
+	Side             Side        `json:"side"`
+	Qty              int         `json:"qty"`
+	RequestedQty     float64     `json:"requested_qty,omitempty"`
+	FilledQty        int         `json:"filled_qty"`
+	FilledQtyFloat   float64     `json:"filled_qty_float,omitempty"`
+	AverageFillPrice float64     `json:"average_fill_price,omitempty"`
+	ReferencePrice   float64     `json:"reference_price"`
+	Notional         float64     `json:"notional"`
+	ClientOrderID    string      `json:"client_order_id"`
+	BrokerOrderID    string      `json:"broker_order_id,omitempty"`
+	TraceID          string      `json:"trace_id,omitempty"`
+	RunID            string      `json:"run_id,omitempty"`
+	DecisionID       string      `json:"decision_id,omitempty"`
+	SnapshotID       string      `json:"snapshot_id,omitempty"`
+	StrategyID       string      `json:"strategy_id,omitempty"`
+	StrategyVersion  string      `json:"strategy_version,omitempty"`
+	DatasetVersion   string      `json:"dataset_version,omitempty"`
+	Status           OrderStatus `json:"status,omitempty"`
+	Reason           string      `json:"reason"`
+	CreatedAt        time.Time   `json:"created_at"`
+	UpdatedAt        time.Time   `json:"updated_at,omitempty"`
+}
+
+type Fill struct {
+	FillID        string    `json:"fill_id"`
+	BrokerOrderID string    `json:"broker_order_id"`
+	ClientOrderID string    `json:"client_order_id"`
+	Symbol        string    `json:"symbol"`
+	Side          Side      `json:"side"`
+	Qty           float64   `json:"qty"`
+	Price         float64   `json:"price"`
+	Timestamp     time.Time `json:"timestamp"`
+}
+
+type Position struct {
+	Symbol      string  `json:"symbol"`
+	Qty         float64 `json:"qty"`
+	MarketValue float64 `json:"market_value"`
+	CostBasis   float64 `json:"cost_basis"`
 }
 
 

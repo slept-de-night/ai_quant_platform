@@ -3,6 +3,7 @@ package oms
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -528,4 +529,138 @@ func TestSuccessfulSubmitStoresBrokerOrderID(t *testing.T) {
 		t.Fatalf("Expected status ACKNOWLEDGED, got %s", ord.Status)
 	}
 }
+
+// 11. Test: fill processing is idempotent
+func TestFillLedgerIdempotency(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+
+	order := &models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            100,
+		ReferencePrice: 200.0,
+		Notional:       20000.0,
+		ClientOrderID:  "fill-idem-1",
+	}
+	_, _ = engine.ReserveOrder(order)
+
+	fill := models.Fill{
+		FillID:        "fill-evt-1",
+		BrokerOrderID: "alpaca-ord-1",
+		ClientOrderID: "fill-idem-1",
+		Symbol:        "AAPL",
+		Side:          models.SideBuy,
+		Qty:           40.0,
+		Price:         200.0,
+		Timestamp:     time.Now().UTC(),
+	}
+
+	// Apply fill first time
+	pos1, err := engine.ApplyFill(fill)
+	if err != nil {
+		t.Fatalf("ApplyFill failed: %v", err)
+	}
+	if pos1.Qty != 40.0 {
+		t.Fatalf("Expected position 40, got %.2f", pos1.Qty)
+	}
+	if engine.GetPortfolio("").Cash != 92000.0 { // 100000 - 40*200
+		t.Fatalf("Expected cash 92000.0, got %.2f", engine.GetPortfolio("").Cash)
+	}
+
+	// Apply identical fill a second time -> MUST BE IDEMPOTENT NO-OP
+	pos2, err := engine.ApplyFill(fill)
+	if err != nil {
+		t.Fatalf("Second ApplyFill failed: %v", err)
+	}
+	if pos2.Qty != 40.0 {
+		t.Fatalf("Duplicate fill corrupted position: expected 40, got %.2f", pos2.Qty)
+	}
+	if engine.GetPortfolio("").Cash != 92000.0 {
+		t.Fatalf("Duplicate fill corrupted cash: expected 92000.0, got %.2f", engine.GetPortfolio("").Cash)
+	}
+	if len(engine.GetFills()) != 1 {
+		t.Fatalf("Expected exactly 1 fill in ledger, got %d", len(engine.GetFills()))
+	}
+}
+
+// 12. Test: step-by-step position projection from confirmed fills:
+// BUY 100 -> fill 40 (+40) -> fill 35 (+75) -> cancel remaining 25 (stays +75)
+func TestPositionProjectionStepByStep(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(200000.0, cfg)
+
+	order := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideBuy,
+		Qty:            100,
+		RequestedQty:   100.0,
+		ReferencePrice: 120.0,
+		Notional:       12000.0,
+		ClientOrderID:  "step-fill-1",
+	}
+	resOrd, dec := engine.ReserveOrder(order)
+	if !dec.Approved || resOrd == nil {
+		t.Fatalf("Expected ReserveOrder to approve, got: %v", dec.Reasons)
+	}
+
+	// Step 1: Fill 40 @ $120 -> Position +40
+	f1 := models.Fill{
+		FillID:        "f-1",
+		ClientOrderID: "step-fill-1",
+		Symbol:        "NVDA",
+		Side:          models.SideBuy,
+		Qty:           40.0,
+		Price:         120.0,
+	}
+	pos1, _ := engine.ApplyFill(f1)
+	if pos1.Qty != 40.0 || pos1.CostBasis != 4800.0 {
+		t.Fatalf("Step 1 failed: pos=%+v", pos1)
+	}
+	ord1, _ := engine.GetOrderByClientID("step-fill-1")
+	if ord1.Status != models.OrderStatusPartiallyFilled || ord1.FilledQty != 40 {
+		t.Fatalf("Step 1 order state failed: status=%s, filled=%d", ord1.Status, ord1.FilledQty)
+	}
+
+	// Step 2: Fill 35 @ $122 -> Position +75, AvgPrice = (4800 + 4270) / 75 = 120.933
+	f2 := models.Fill{
+		FillID:        "f-2",
+		ClientOrderID: "step-fill-1",
+		Symbol:        "NVDA",
+		Side:          models.SideBuy,
+		Qty:           35.0,
+		Price:         122.0,
+	}
+	pos2, _ := engine.ApplyFill(f2)
+	if pos2.Qty != 75.0 {
+		t.Fatalf("Step 2 failed: expected 75 qty, got %.2f", pos2.Qty)
+	}
+	ord2, _ := engine.GetOrderByClientID("step-fill-1")
+	if ord2.Status != models.OrderStatusPartiallyFilled || ord2.FilledQty != 75 {
+		t.Fatalf("Step 2 order state failed: status=%s, filled=%d", ord2.Status, ord2.FilledQty)
+	}
+	expectedAvgPrice := (40.0*120.0 + 35.0*122.0) / 75.0
+	if math.Abs(ord2.AverageFillPrice-expectedAvgPrice) > 0.001 {
+		t.Fatalf("Expected avg fill price %.4f, got %.4f", expectedAvgPrice, ord2.AverageFillPrice)
+	}
+
+	// Step 3: Cancel remaining 25 -> Order is canceled, position remains +75
+	engine.UpdateOrderStatus("step-fill-1", models.OrderStatusCancelled)
+	ord3, _ := engine.GetOrderByClientID("step-fill-1")
+	if ord3.Status != models.OrderStatusCancelled {
+		t.Fatalf("Expected status CANCELLED, got %s", ord3.Status)
+	}
+
+	posFinal, ok := engine.GetPosition("NVDA")
+	if !ok || posFinal.Qty != 75.0 {
+		t.Fatalf("Position after cancel must remain 75.0, got ok=%v, qty=%.2f", ok, posFinal.Qty)
+	}
+
+	// Verify symbol query in portfolio
+	portState := engine.GetPortfolio("NVDA")
+	if portState.CurrentSymbolQty != 75.0 {
+		t.Fatalf("Expected CurrentSymbolQty=75, got %.2f", portState.CurrentSymbolQty)
+	}
+}
+
 

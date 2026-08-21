@@ -301,17 +301,34 @@ func main() {
 
 	mux := setupRouter(engine, brokerReg, gateway, reconciler)
 
+	host := os.Getenv("BIND_HOST")
+	if host == "" {
+		host = os.Getenv("HOST")
+	}
+	listenAddr := auth.GetListenAddress(host, port)
+
 	authToken := os.Getenv("AUTH_TOKEN")
 	if authToken == "" {
 		authToken = os.Getenv("ENGINE_API_KEY")
 	}
-	authRequired := os.Getenv("AUTH_REQUIRED") == "true"
+	execEnv := os.Getenv("EXECUTION_ENVIRONMENT")
+	if execEnv == "" {
+		execEnv = os.Getenv("ENVIRONMENT")
+	}
+	allowAnonymousLocal := strings.EqualFold(os.Getenv("ALLOW_ANONYMOUS_LOCAL"), "true")
+
+	// Validate credentials and security posture before listening
+	if err := auth.ValidateEnvironmentCredentials(execEnv, authToken, allowAnonymousLocal); err != nil {
+		log.Fatalf("[SECURITY FATAL] %v", err)
+	}
+
+	authRequired := os.Getenv("AUTH_REQUIRED") == "true" || strings.EqualFold(execEnv, "live")
 	authMw := auth.Middleware(authToken, authRequired)
 
 	handler := metrics.DefaultRegistry.Middleware(authMw(mux))
 
-	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
-	if err := http.ListenAndServe(":"+port, handler); err != nil {
+	log.Printf("Starting Go High-Performance Execution Engine on %s (Secure Loopback Binding)", listenAddr)
+	if err := http.ListenAndServe(listenAddr, handler); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

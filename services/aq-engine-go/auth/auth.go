@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -51,6 +54,53 @@ func Middleware(configuredToken string, authRequired bool) func(http.Handler) ht
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// ValidateEnvironmentCredentials verifies that credentials and authentication posture meet safety standards for the target environment.
+func ValidateEnvironmentCredentials(execEnv string, authToken string, allowAnonymousLocal bool) error {
+	envNorm := strings.ToLower(strings.TrimSpace(execEnv))
+	trimmedToken := strings.TrimSpace(authToken)
+
+	// Live / Real money mode: auth token is strictly mandatory and must meet entropy standards
+	if envNorm == "live" || envNorm == "production" || envNorm == "real" {
+		if trimmedToken == "" {
+			return errors.New("FATAL: AUTH_TOKEN or ENGINE_API_KEY is required in live/production mode; anonymous access is strictly prohibited")
+		}
+		if len(trimmedToken) < 16 {
+			return errors.New("FATAL: AUTH_TOKEN in live mode must be at least 16 characters for adequate entropy")
+		}
+		lower := strings.ToLower(trimmedToken)
+		insecureSubstrings := []string{
+			"admin", "password", "secret", "123456", "default", "changeme",
+		}
+		for _, bad := range insecureSubstrings {
+			if strings.Contains(lower, bad) {
+				return fmt.Errorf("FATAL: Insecure/default substring '%s' detected in live mode AUTH_TOKEN", bad)
+			}
+		}
+		return nil
+	}
+
+	// Simulation / Paper mode
+	if trimmedToken == "" && !allowAnonymousLocal {
+		return errors.New("AUTH_TOKEN not configured and ALLOW_ANONYMOUS_LOCAL is false")
+	}
+
+	return nil
+}
+
+// GetListenAddress derives the secure network listening address.
+// Defaults to loopback 127.0.0.1:8080, never 0.0.0.0:8080 unless explicitly configured.
+func GetListenAddress(hostEnv, portEnv string) string {
+	host := strings.TrimSpace(hostEnv)
+	if host == "" {
+		host = "127.0.0.1" // Secure default loopback binding
+	}
+	port := strings.TrimSpace(portEnv)
+	if port == "" {
+		port = "8080"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // RedactSecret replaces sensitive substrings in messages with [REDACTED].

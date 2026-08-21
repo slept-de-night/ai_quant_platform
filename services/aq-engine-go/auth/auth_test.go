@@ -80,3 +80,64 @@ func TestSecretRedaction(t *testing.T) {
 		t.Fatalf("Expected [REDACTED] in message: %s", redacted)
 	}
 }
+
+func TestValidateEnvironmentCredentials_LiveModeRequiresStrongSecret(t *testing.T) {
+	// 1. Missing secret in live mode -> error
+	err := ValidateEnvironmentCredentials("live", "", false)
+	if err == nil {
+		t.Fatalf("Expected error for missing AUTH_TOKEN in live mode")
+	}
+
+	// 2. Short secret in live mode -> error
+	err = ValidateEnvironmentCredentials("live", "short-secret", false)
+	if err == nil {
+		t.Fatalf("Expected error for short AUTH_TOKEN in live mode")
+	}
+
+	// 3. Insecure default secret in live mode -> error
+	err = ValidateEnvironmentCredentials("live", "password12345678", false)
+	if err == nil {
+		t.Fatalf("Expected error for default password AUTH_TOKEN in live mode")
+	}
+
+	// 4. Strong secret in live mode -> success
+	err = ValidateEnvironmentCredentials("live", "high-entropy-secure-token-998877", false)
+	if err != nil {
+		t.Fatalf("Expected success for strong secret in live mode, got: %v", err)
+	}
+}
+
+func TestValidateEnvironmentCredentials_SimulationMode(t *testing.T) {
+	// Anonymous allowed in simulation mode when explicitly flagged
+	err := ValidateEnvironmentCredentials("simulation", "", true)
+	if err != nil {
+		t.Fatalf("Expected success for anonymous local in simulation mode, got: %v", err)
+	}
+
+	// Anonymous rejected if allowAnonymousLocal is false
+	err = ValidateEnvironmentCredentials("simulation", "", false)
+	if err == nil {
+		t.Fatalf("Expected error when anonymous local is disallowed")
+	}
+}
+
+func TestGetListenAddress_DefaultsToLoopback(t *testing.T) {
+	// 1. Empty host and port -> 127.0.0.1:8080 (never 0.0.0.0)
+	addr1 := GetListenAddress("", "")
+	if addr1 != "127.0.0.1:8080" {
+		t.Fatalf("Expected default 127.0.0.1:8080, got %s", addr1)
+	}
+
+	// 2. Custom port -> 127.0.0.1:9090
+	addr2 := GetListenAddress("", "9090")
+	if addr2 != "127.0.0.1:9090" {
+		t.Fatalf("Expected 127.0.0.1:9090, got %s", addr2)
+	}
+
+	// 3. Custom loopback host
+	addr3 := GetListenAddress("127.0.0.2", "8085")
+	if addr3 != "127.0.0.2:8085" {
+		t.Fatalf("Expected 127.0.0.2:8085, got %s", addr3)
+	}
+}
+

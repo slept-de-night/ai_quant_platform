@@ -17,11 +17,14 @@ import (
 
 // mockBroker is a test spy implementing broker.BrokerAdapter
 type mockBroker struct {
-	mu          sync.Mutex
-	submitCalls int
-	shouldFail  bool
-	failErr     error
-	orders      map[string]broker.BrokerOrder
+	mu                sync.Mutex
+	submitCalls       int
+	getOrderCalls     int
+	shouldFail        bool
+	failErr           error
+	getOrderErr       error
+	acceptBeforeError bool
+	orders            map[string]broker.BrokerOrder
 }
 
 func newMockBroker(shouldFail bool, failErr error) *mockBroker {
@@ -35,18 +38,22 @@ func newMockBroker(shouldFail bool, failErr error) *mockBroker {
 	}
 }
 
-func (m *mockBroker) Name() string                     { return "mock-broker" }
-func (m *mockBroker) Kind() broker.BrokerKind          { return broker.BrokerKindPaper }
-func (m *mockBroker) Environment() broker.Environment  { return broker.EnvSimulation }
-func (m *mockBroker) IsConfigured() bool               { return true }
-func (m *mockBroker) CancelOrder(id string) error      { return nil }
+func (m *mockBroker) Name() string                    { return "mock-broker" }
+func (m *mockBroker) Kind() broker.BrokerKind         { return broker.BrokerKindPaper }
+func (m *mockBroker) Environment() broker.Environment { return broker.EnvSimulation }
+func (m *mockBroker) IsConfigured() bool              { return true }
+func (m *mockBroker) CancelOrder(id string) error     { return nil }
 func (m *mockBroker) GetOrder(id string) (*broker.BrokerOrder, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.getOrderCalls++
+	if m.getOrderErr != nil {
+		return nil, m.getOrderErr
+	}
 	if ord, ok := m.orders[id]; ok {
 		return &ord, nil
 	}
-	return nil, fmt.Errorf("order not found: %s", id)
+	return nil, broker.ErrOrderNotFound
 }
 func (m *mockBroker) ListOrders() ([]broker.BrokerOrder, error)       { return nil, nil }
 func (m *mockBroker) ListPositions() ([]broker.BrokerPosition, error) { return nil, nil }
@@ -71,21 +78,27 @@ func (m *mockBroker) SubmitOrder(order *models.OrderIntent) (*broker.BrokerOrder
 	defer m.mu.Unlock()
 	m.submitCalls++
 
-	if m.shouldFail {
-		return nil, m.failErr
-	}
-
 	bo := broker.BrokerOrder{
 		ID:            fmt.Sprintf("mock-%d", m.submitCalls),
+		BrokerOrderID: fmt.Sprintf("mock-%d", m.submitCalls),
 		ClientOrderID: order.ClientOrderID,
 		Symbol:        order.Symbol,
 		Side:          string(order.Side),
 		Qty:           order.Qty,
 		FilledQty:     order.Qty,
-		Status:        "filled",
+		Status:        broker.BrokerOrderStatusAcknowledged,
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}
+
+	if m.acceptBeforeError {
+		m.orders[order.ClientOrderID] = bo
+	}
+
+	if m.shouldFail {
+		return nil, m.failErr
+	}
+
 	m.orders[order.ClientOrderID] = bo
 	return &bo, nil
 }
@@ -1039,6 +1052,193 @@ func TestUnreadyJournalBlocksCheckRiskAndReserveOrder(t *testing.T) {
 		t.Fatalf("ReserveOrder must reject order when journal is not ready")
 	}
 }
+
+// 9. Test: Ambiguous Submit - Broker accepts + client timeout -> query finds order -> ACKNOWLEDGED (no duplicate)
+func TestAmbiguousSubmit_BrokerAcceptsAndTimeoutResolvesToAcknowledged(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+
+	// Mock broker that accepts order into its memory but returns timeout on submit
+	mb := newMockBroker(true, errors.New("i/o timeout on POST /v2/orders"))
+	mb.acceptBeforeError = true
+
+	ord := &models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            10,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "ambig-client-1",
+	}
+
+	resp, dec, err := engine.Submit(ord, mb)
+	if err != nil {
+		t.Fatalf("Expected ambiguous submit to resolve to success when query finds order, got err: %v", err)
+	}
+	if !dec.Approved {
+		t.Fatalf("Expected risk decision approved")
+	}
+	if resp == nil || resp.ClientOrderID != "ambig-client-1" {
+		t.Fatalf("Expected non-nil broker order with matching client order ID")
+	}
+
+	// Verify OMS recorded ACKNOWLEDGED
+	histOrd, exists := engine.GetOrderByClientID("ambig-client-1")
+	if !exists {
+		t.Fatalf("Order must exist in OMS history")
+	}
+	if histOrd.Status != models.OrderStatusAcknowledged {
+		t.Fatalf("Expected status ACKNOWLEDGED, got %s", histOrd.Status)
+	}
+	if engine.IsFrozen() {
+		t.Fatalf("Engine should remain unfrozen when ambiguity is resolved")
+	}
+	if mb.submitCalls != 1 {
+		t.Fatalf("SubmitOrder should be called exactly once; got %d", mb.submitCalls)
+	}
+	if mb.getOrderCalls != 1 {
+		t.Fatalf("GetOrder should be called exactly once to resolve state; got %d", mb.getOrderCalls)
+	}
+}
+
+// 10. Test: Ambiguous Submit - Timeout + detail query confirms absent -> SUBMIT_FAILED
+func TestAmbiguousSubmit_TimeoutAndConfirmedAbsentResolvesToSubmitFailed(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+
+	// Mock broker that fails with connection reset and does not have the order
+	mb := newMockBroker(true, errors.New("read: connection reset by peer"))
+	mb.acceptBeforeError = false // Order is not on broker
+
+	ord := &models.OrderIntent{
+		Symbol:         "MSFT",
+		Side:           models.SideBuy,
+		Qty:            5,
+		ReferencePrice: 300.0,
+		ClientOrderID:  "ambig-absent-1",
+	}
+
+	resp, dec, err := engine.Submit(ord, mb)
+	if err == nil {
+		t.Fatalf("Expected submit to fail when confirmed absent on broker")
+	}
+	if resp != nil {
+		t.Fatalf("Expected nil broker order on failure")
+	}
+	if !dec.Approved {
+		t.Fatalf("Expected risk decision itself to be approved before broker error")
+	}
+
+	// Verify OMS recorded SUBMIT_FAILED
+	histOrd, exists := engine.GetOrderByClientID("ambig-absent-1")
+	if !exists {
+		t.Fatalf("Order must exist in OMS history")
+	}
+	if histOrd.Status != models.OrderStatusSubmitFailed {
+		t.Fatalf("Expected status SUBMIT_FAILED, got %s", histOrd.Status)
+	}
+	if engine.IsFrozen() {
+		t.Fatalf("Engine should not freeze when order is confirmed absent")
+	}
+	if mb.getOrderCalls != 1 {
+		t.Fatalf("GetOrder should be called once to verify presence; got %d", mb.getOrderCalls)
+	}
+}
+
+// 11. Test: Ambiguous Submit - Timeout + query also fails / uncertain -> FROZEN / reconciliation required
+func TestAmbiguousSubmit_TimeoutAndUnresolvedQueryFreezesEngine(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+
+	// Mock broker that fails submit with timeout AND fails GetOrder with timeout
+	mb := newMockBroker(true, errors.New("context deadline exceeded"))
+	mb.getOrderErr = errors.New("connection refused on GET /v2/orders")
+
+	ord := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideBuy,
+		Qty:            20,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "ambig-unresolved-1",
+	}
+
+	resp, _, err := engine.Submit(ord, mb)
+	if err == nil {
+		t.Fatalf("Expected submit error when query fails")
+	}
+	if resp != nil {
+		t.Fatalf("Expected nil broker order")
+	}
+
+	// Invariant: Engine MUST be frozen
+	if !engine.IsFrozen() {
+		t.Fatalf("Engine MUST automatically freeze when ambiguous submit state cannot be resolved")
+	}
+
+	// Order status remains SUBMISSION_UNKNOWN
+	histOrd, exists := engine.GetOrderByClientID("ambig-unresolved-1")
+	if !exists {
+		t.Fatalf("Order must exist in history")
+	}
+	if histOrd.Status != models.OrderStatusSubmissionUnknown {
+		t.Fatalf("Expected status SUBMISSION_UNKNOWN, got %s", histOrd.Status)
+	}
+
+	// Subsequent orders blocked because engine is frozen
+	nextOrd := &models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            5,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "next-blocked-ord",
+	}
+	nextDec := engine.CheckRisk(nextOrd)
+	if nextDec.Approved {
+		t.Fatalf("Subsequent orders must be rejected while engine is frozen")
+	}
+}
+
+// 12. Test: Confirmed Rejection (non-ambiguous error) does NOT query broker and fails immediately
+func TestConfirmedRejection_DoesNotQueryBrokerAndFailsImmediately(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+
+	// Non-ambiguous definitive rejection (e.g. 422 Unprocessable / insufficient buying power)
+	mb := newMockBroker(true, errors.New("alpaca error (422): insufficient buying power"))
+
+	ord := &models.OrderIntent{
+		Symbol:         "TSLA",
+		Side:           models.SideBuy,
+		Qty:            10,
+		ReferencePrice: 200.0,
+		ClientOrderID:  "confirmed-rej-1",
+	}
+
+	resp, _, err := engine.Submit(ord, mb)
+	if err == nil {
+		t.Fatalf("Expected submit to fail on confirmed rejection")
+	}
+	if resp != nil {
+		t.Fatalf("Expected nil response on rejection")
+	}
+
+	// Broker GetOrder must NEVER be called for definitive rejections
+	if mb.getOrderCalls != 0 {
+		t.Fatalf("GetOrder must not be called on definitive rejections; got %d calls", mb.getOrderCalls)
+	}
+
+	// OMS status is SUBMIT_FAILED and engine is NOT frozen
+	histOrd, exists := engine.GetOrderByClientID("confirmed-rej-1")
+	if !exists {
+		t.Fatalf("Order must exist in history")
+	}
+	if histOrd.Status != models.OrderStatusSubmitFailed {
+		t.Fatalf("Expected status SUBMIT_FAILED, got %s", histOrd.Status)
+	}
+	if engine.IsFrozen() {
+		t.Fatalf("Engine should not freeze on confirmed 4xx rejections")
+	}
+}
+
 
 
 

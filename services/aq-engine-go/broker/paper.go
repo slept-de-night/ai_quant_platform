@@ -115,7 +115,7 @@ func (p *PaperAdapter) GetOrder(clientOrderID string) (*BrokerOrder, error) {
 
 	ord, exists := p.orders[clientOrderID]
 	if !exists {
-		return nil, fmt.Errorf("order not found: %s", clientOrderID)
+		return nil, ErrOrderNotFound
 	}
 	return &ord, nil
 }

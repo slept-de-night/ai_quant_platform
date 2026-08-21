@@ -386,6 +386,8 @@ func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status model
 		evtType = EventOrderSubmitFailed
 	case models.OrderStatusCancelled:
 		evtType = EventOrderCanceled
+	case models.OrderStatusSubmissionUnknown:
+		evtType = EventSubmissionUnknown
 	}
 
 	if evtType != "" {
@@ -751,6 +753,19 @@ func (e *Engine) replayEvent(evt JournalEvent) {
 				}
 			}
 		}
+	case EventSubmissionUnknown:
+		if ord, ok := e.orderHistory[evt.ClientOrderID]; ok {
+			ord.Status = models.OrderStatusSubmissionUnknown
+			ord.Reason = evt.Reason
+			ord.UpdatedAt = evt.Timestamp
+			e.orderHistory[evt.ClientOrderID] = ord
+			for i := range e.orderList {
+				if e.orderList[i].ClientOrderID == evt.ClientOrderID {
+					e.orderList[i] = ord
+					break
+				}
+			}
+		}
 	case EventFillRecorded:
 		if evt.Fill != nil {
 			fill := *evt.Fill
@@ -831,8 +846,16 @@ func (e *Engine) replayEvent(evt JournalEvent) {
 	}
 }
 
-// Submit performs the full order submission state machine:
-// CheckRisk/ReserveOrder -> SUBMITTING -> broker SubmitOrder -> ACKNOWLEDGED or SUBMIT_FAILED.
+// Submit performs the full order submission state machine with ambiguous failure recovery:
+// CheckRisk/ReserveOrder -> SUBMITTING -> broker SubmitOrder.
+// If broker returns success -> ACKNOWLEDGED.
+// If broker returns confirmed rejection -> SUBMIT_FAILED.
+// If broker returns ambiguous transport error (timeout, connection reset, 5xx):
+//   -> SUBMISSION_UNKNOWN
+//   -> query broker using SAME client_order_id:
+//        - found -> ACKNOWLEDGED (or actual broker status)
+//        - confirmed absent -> SUBMIT_FAILED
+//        - uncertain / query fails -> remain SUBMISSION_UNKNOWN and FREEZE engine for operator reconciliation.
 func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*broker.BrokerOrder, models.RiskDecision, error) {
 	if b == nil {
 		return nil, models.RiskDecision{Approved: false, Reasons: []string{"broker adapter is nil"}}, errors.New("broker adapter is nil")
@@ -844,18 +867,57 @@ func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*bro
 	}
 
 	resp, err := b.SubmitOrder(reserved)
-	if err != nil {
-		e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, err.Error())
+	if err == nil && resp != nil {
+		brokerOrderID := resp.ID
+		_ = e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, models.OrderStatusAcknowledged, brokerOrderID)
+		metrics.DefaultRegistry.IncOrdersSubmitted()
+		return resp, decision, nil
+	}
+
+	// SubmitOrder returned an error. Classify into Confirmed Rejection vs Ambiguous Transport Failure.
+	if !broker.IsAmbiguousTransportError(err) {
+		// Confirmed rejection (e.g. 400 Bad Request, 422 Unprocessable, unconfigured)
+		_ = e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, err.Error())
 		return nil, decision, err
 	}
 
-	brokerOrderID := ""
-	if resp != nil {
-		brokerOrderID = resp.ID
+	// Ambiguous transport failure (timeout, network drop, 5xx).
+	// 1. Mark status as SUBMISSION_UNKNOWN and durably journal
+	_ = e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmissionUnknown, fmt.Sprintf("ambiguous transport failure: %v", err))
+
+	// 2. Bounded verification: query broker using the EXACT SAME client_order_id
+	queryResp, queryErr := b.GetOrder(order.ClientOrderID)
+	if queryErr == nil && queryResp != nil {
+		// Subcase A: Order was successfully accepted by the broker despite network failure on submit response
+		var finalStatus models.OrderStatus
+		switch queryResp.Status {
+		case broker.BrokerOrderStatusFilled:
+			finalStatus = models.OrderStatusFilled
+		case broker.BrokerOrderStatusPartiallyFilled:
+			finalStatus = models.OrderStatusPartiallyFilled
+		case broker.BrokerOrderStatusCanceled:
+			finalStatus = models.OrderStatusCancelled
+		case broker.BrokerOrderStatusRejected:
+			finalStatus = models.OrderStatusRejected
+		default:
+			finalStatus = models.OrderStatusAcknowledged
+		}
+		_ = e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, finalStatus, queryResp.ID)
+		metrics.DefaultRegistry.IncOrdersSubmitted()
+		return queryResp, decision, nil
 	}
-	e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, models.OrderStatusAcknowledged, brokerOrderID)
-	metrics.DefaultRegistry.IncOrdersSubmitted()
-	return resp, decision, nil
+
+	if broker.IsOrderNotFoundError(queryErr) {
+		// Subcase B: Order confirmed absent on broker
+		_ = e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, fmt.Sprintf("confirmed absent on broker after ambiguous submit failure (%v)", err))
+		return nil, decision, fmt.Errorf("submit failed (confirmed absent on broker): %w", err)
+	}
+
+	// Subcase C: Still uncertain (e.g. query also timed out or returned error).
+	// Invariant: Freeze engine immediately and require explicit reconciliation.
+	freezeReason := fmt.Sprintf("unresolved ambiguous broker submission for order %s (%v); reconciliation required", order.ClientOrderID, err)
+	e.FreezeWithReason(freezeReason, "oms_ambiguity_gate", "")
+	return nil, decision, fmt.Errorf("ambiguous submission state unresolved (engine frozen): %w", err)
 }
 
 // ConstructLocalSnapshot builds an authentic, non-fabricated snapshot of local OMS orders, confirmed positions, and cash state for reconciliation.

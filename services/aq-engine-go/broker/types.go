@@ -81,6 +81,45 @@ func NormalizeBrokerStatus(raw string) BrokerOrderStatus {
 	}
 }
 
+// IsAmbiguousTransportError returns true if an error indicates that the network transport failed
+// without a definitive rejection response from the broker (e.g. timeout, connection reset, 5xx).
+func IsAmbiguousTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrBrokerNotConfigured) {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "eof") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "http error 500") ||
+		strings.Contains(errStr, "http error 502") ||
+		strings.Contains(errStr, "http error 503") ||
+		strings.Contains(errStr, "http error 504") ||
+		strings.Contains(errStr, "server error") ||
+		strings.Contains(errStr, "temporary network error") {
+		return true
+	}
+	return false
+}
+
+// IsOrderNotFoundError returns true if an error indicates that the order was confirmed absent on the broker.
+func IsOrderNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrOrderNotFound) {
+		return true
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "not found") || strings.Contains(errStr, "404")
+}
+
 type BrokerOrder struct {
 	ID               string            `json:"id"`
 	BrokerOrderID    string            `json:"broker_order_id"`

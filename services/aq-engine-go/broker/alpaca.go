@@ -265,8 +265,11 @@ func (c *AlpacaAdapter) GetOrder(clientOrderID string) (*BrokerOrder, error) {
 	defer cancel()
 
 	endpoint := fmt.Sprintf("/v2/orders:by_client_order_id?client_order_id=%s", url.QueryEscape(clientOrderID))
-	bodyBytes, _, err := c.doRequest(ctx, "GET", endpoint, nil)
+	bodyBytes, statusCode, err := c.doRequest(ctx, "GET", endpoint, nil)
 	if err != nil {
+		if statusCode == http.StatusNotFound {
+			return nil, ErrOrderNotFound
+		}
 		return nil, err
 	}
 

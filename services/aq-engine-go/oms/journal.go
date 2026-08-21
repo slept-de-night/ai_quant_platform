@@ -18,11 +18,12 @@ const (
 	EventOrderReserved     JournalEventType = "ORDER_RESERVED"
 	EventOrderSubmitting   JournalEventType = "ORDER_SUBMITTING"
 	EventOrderAcknowledged JournalEventType = "ORDER_ACKNOWLEDGED"
-	EventOrderSubmitFailed JournalEventType = "ORDER_SUBMIT_FAILED"
-	EventFillRecorded      JournalEventType = "FILL_RECORDED"
-	EventOrderCanceled     JournalEventType = "ORDER_CANCELED"
-	EventEngineFrozen      JournalEventType = "ENGINE_FROZEN"
-	EventEngineUnfrozen    JournalEventType = "ENGINE_UNFROZEN"
+	EventOrderSubmitFailed   JournalEventType = "ORDER_SUBMIT_FAILED"
+	EventSubmissionUnknown   JournalEventType = "SUBMISSION_UNKNOWN"
+	EventFillRecorded        JournalEventType = "FILL_RECORDED"
+	EventOrderCanceled       JournalEventType = "ORDER_CANCELED"
+	EventEngineFrozen        JournalEventType = "ENGINE_FROZEN"
+	EventEngineUnfrozen      JournalEventType = "ENGINE_UNFROZEN"
 )
 
 type JournalEvent struct {

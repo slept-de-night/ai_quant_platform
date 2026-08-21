@@ -26,6 +26,7 @@ const (
 	OrderStatusCancelPending          OrderStatus = "CANCEL_PENDING"
 	OrderStatusCancelled              OrderStatus = "CANCELLED"
 	OrderStatusSubmitFailed           OrderStatus = "SUBMIT_FAILED"
+	OrderStatusSubmissionUnknown      OrderStatus = "SUBMISSION_UNKNOWN"
 	OrderStatusExpired                OrderStatus = "EXPIRED"
 	OrderStatusReconciliationRequired OrderStatus = "RECONCILIATION_REQUIRED"
 )

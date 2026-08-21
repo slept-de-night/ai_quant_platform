@@ -13,6 +13,7 @@ import (
 
 	"aq-engine-go/auth"
 	"aq-engine-go/broker"
+	"aq-engine-go/broker/webull"
 	"aq-engine-go/market"
 	"aq-engine-go/metrics"
 	"aq-engine-go/models"
@@ -169,6 +170,11 @@ func main() {
 	webullKey := os.Getenv("WEBULL_APP_KEY")
 	webullSecret := os.Getenv("WEBULL_APP_SECRET")
 	webullAccount := os.Getenv("WEBULL_ACCOUNT_ID")
+	webullAccessToken := os.Getenv("WEBULL_ACCESS_TOKEN")
+	webullEnvStr := strings.ToUpper(strings.TrimSpace(os.Getenv("WEBULL_ENVIRONMENT")))
+	if webullEnvStr == "" {
+		webullEnvStr = "SANDBOX"
+	}
 
 	// Initialize subsystems
 	riskCfg := models.DefaultRiskConfig()
@@ -213,13 +219,35 @@ func main() {
 	// Initialize Pluggable Broker Registry
 	brokerReg := broker.NewRegistry()
 	paperAdapter := broker.NewPaperAdapter("paper-simulation", initialEquity)
-	webullAdapter := broker.NewWebullAdapter("webull-main", webullKey, webullSecret, webullAccount, true)
+
+	// Webull: use the real OpenAPI subpackage adapter in READ-ONLY mode (Phase W3).
+	// Economic order writes stay disabled until sandbox write certification; the
+	// adapter reports not-ready and never advertises submit/cancel in this mode.
+	webullEnv := webull.EnvSandbox
+	if webullEnvStr == "LIVE" {
+		webullEnv = webull.EnvLive
+	}
+	webullAdapter, err := webull.NewAdapter("webull-main", webull.Credentials{
+		AppKey:      webullKey,
+		AppSecret:   webullSecret,
+		AccessToken: webullAccessToken,
+		AccountID:   webullAccount,
+		Environment: webullEnv,
+	})
+	if err != nil {
+		log.Printf("[BROKER WARNING] failed to initialize Webull OpenAPI adapter: %v; Webull integration disabled (safe)", err)
+		webullAdapter = nil
+	} else {
+		webullAdapter.SetReadOnly(true)
+	}
 	alpacaAdapter := broker.NewAlpacaAdapter("alpaca-paper", alpacaKey, alpacaSecret, true)
 
 	// Safe default startup broker is paper
 	brokerReg.Register(paperAdapter)
 	brokerReg.Register(alpacaAdapter)
-	brokerReg.Register(webullAdapter)
+	if webullAdapter != nil {
+		brokerReg.Register(webullAdapter)
+	}
 
 	execBroker := strings.ToLower(strings.TrimSpace(os.Getenv("EXECUTION_BROKER")))
 	switch execBroker {

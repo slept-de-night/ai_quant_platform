@@ -298,3 +298,91 @@ func TestAdapter_ContractAndQuarantine(t *testing.T) {
 		t.Fatalf("GetAccountState failed: %v", err)
 	}
 }
+
+// TestAdapter_ReadOnlyMode verifies the D7 read-only watchdog: economic writes are
+// refused, capabilities never advertise submit/cancel, and Ready stays false even
+// when read-only connectivity succeeds. Reads and reconciliation still work.
+func TestAdapter_ReadOnlyMode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/trading/assets/balances/get":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"total_asset_currency":"USD","total_cash_balance":"50000.00","total_net_liquidation_value":"50000.00","account_currency_assets":[{"currency":"USD","cash_balance":"50000.00","buying_power":"60000.00"}]}`))
+		case "/trading/orders/open-orders/list":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`[]`))
+		}
+	}))
+	defer server.Close()
+
+	creds := Credentials{
+		AppKey:      "wb_test_key",
+		AppSecret:   "wb_test_secret",
+		AccountID:   "acc_99",
+		Environment: EnvSandbox,
+	}
+
+	adapter, err := NewAdapter("webull-readonly", creds, WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewAdapter failed: %v", err)
+	}
+	adapter.SetReadOnly(true)
+
+	if !adapter.IsReadOnly() {
+		t.Fatalf("expected IsReadOnly=true after SetReadOnly(true)")
+	}
+
+	// 1. Capabilities must never advertise economic writes in read-only mode.
+	caps := adapter.Capabilities()
+	if caps.SubmitOrder || caps.CancelOrder || caps.ExecutionEvents {
+		t.Fatalf("read-only capabilities must not advertise writes; got %+v", caps)
+	}
+	if !caps.QueryOrder || !caps.ListOrders || !caps.ListPositions || !caps.AccountState || !caps.Reconciliation {
+		t.Fatalf("read-only capabilities must expose broker truth + reconciliation; got %+v", caps)
+	}
+
+	// 2. Submit/Cancel refused with ErrReadOnlyQuarantine even in sandbox.
+	ord := &models.OrderIntent{Symbol: "AAPL", Side: models.SideBuy, Qty: 10, ClientOrderID: "ro-1"}
+	if _, err := adapter.SubmitOrder(ord); err != ErrReadOnlyQuarantine {
+		t.Fatalf("expected ErrReadOnlyQuarantine on SubmitOrder in read-only mode, got %v", err)
+	}
+	if err := adapter.CancelOrder("ro-1"); err != ErrReadOnlyQuarantine {
+		t.Fatalf("expected ErrReadOnlyQuarantine on CancelOrder in read-only mode, got %v", err)
+	}
+
+	// 3. Health: connected + configured true, but Ready=false while read-only.
+	health := adapter.GetHealth()
+	if !health.Configured || !health.Connected {
+		t.Fatalf("expected read-only health configured+connected, got %+v", health)
+	}
+	if health.Ready {
+		t.Fatalf("read-only adapter must report Ready=false until sandbox write cert; got %+v", health)
+	}
+	if caps2 := health.Capabilities; caps2 == nil || caps2.SubmitOrder || caps2.CancelOrder || caps2.ExecutionEvents {
+		t.Fatalf("read-only health capabilities must not advertise writes; got %+v", caps2)
+	}
+
+	// 4. Reads still work in read-only mode.
+	acc, err := adapter.GetAccountState()
+	if err != nil || acc.Cash != 50000.00 {
+		t.Fatalf("read-only GetAccountState failed: %v (cash=%.2f)", err, acc.Cash)
+	}
+	if _, err := adapter.ListOrders(); err != nil {
+		t.Fatalf("read-only ListOrders failed: %v", err)
+	}
+	if _, err := adapter.GetBrokerSnapshot(); err != nil {
+		t.Fatalf("read-only GetBrokerSnapshot failed: %v", err)
+	}
+
+	// 5. Exiting read-only restores sandbox write capability advertisement.
+	adapter.SetReadOnly(false)
+	if adapter.IsReadOnly() {
+		t.Fatalf("expected IsReadOnly=false after SetReadOnly(false)")
+	}
+	if !adapter.Capabilities().SubmitOrder || !adapter.Capabilities().CancelOrder {
+		t.Fatalf("sandbox adapter should advertise writes after leaving read-only mode")
+	}
+}

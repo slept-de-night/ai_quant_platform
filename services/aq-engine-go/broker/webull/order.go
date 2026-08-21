@@ -15,6 +15,11 @@ import (
 // ErrLiveTradingNotPermitted enforces the real-money safety invariant blocking live order submission.
 var ErrLiveTradingNotPermitted = errors.New("live order submission is strictly prohibited: Webull live trading release gates have not been met")
 
+// ErrReadOnlyQuarantine blocks economic order writes while the Webull adapter
+// is in read-only / reconciliation quarantine (Phase W3), before sandbox write
+// certification has passed.
+var ErrReadOnlyQuarantine = errors.New("webull adapter is in read-only quarantine: order writes disabled pending sandbox write certification")
+
 type PlaceOrderRequest struct {
 	ClientOrderID string `json:"client_order_id"`
 	AccountID     string `json:"account_id"`

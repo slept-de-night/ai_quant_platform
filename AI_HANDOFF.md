@@ -1,21 +1,22 @@
-# AI Quant Platform v1.3 — Engineering Handoff & Knowledge Base
+# AI Quant Platform v1.4 — Engineering Handoff & Knowledge Base
 
 **Date:** 2026-08-21  
 **Repository:** `slept-de-night/ai_quant_platform`  
 **Git Author:** `slept-de-night <slept-de-night@users.noreply.github.com>`  
-**Status:** All 8 Phases of the Institutional Truth, Safety & UX Stabilization Plan are **COMPLETED, VERIFIED & COMMITTED**.
+**Status:** All Phases across Safety Hardening (R0–R7), Webull Integration (W1–W6), and Financial Knowledge / Learning Mode (K1–K5) are **COMPLETED, VERIFIED & COMMITTED**.
 
 ---
 
 ## 1. Executive Summary & State of the Codebase
 
-The platform is an institutional-grade, cross-asset quantitative trading, intelligence, and execution workstation. It pairs a **high-performance Go 1.22 OMS/EMS execution core** with a **Python 3.11 Point-in-Time (PIT) research and multi-agent DAG engine**, surfaced through a **React 18 / TypeScript institutional workstation**.
+The platform is an institutional-grade, cross-asset quantitative trading, intelligence, and execution workstation. It pairs a **high-performance Go 1.22 OMS/EMS execution core** with a **Python 3.11 Point-in-Time (PIT) research, multi-agent DAG, and Financial Knowledge engine**, surfaced through a **React 18 / TypeScript institutional workstation**.
 
 ### Test Suite Health
-- **Go OMS & Execution Core**: `cd services/aq-engine-go && go test -v -count=1 ./...` $\to$ **22 / 22 PASS (0.26s)**
-- **Python Research & FastAPI**: `python -m pytest tests/ -q` $\to$ **79 / 79 PASS (37.7s)**
-- **Frontend Workstation**: `cd frontend && npm run build` $\to$ **0 Errors (502 kB clean bundle)**
+- **Go OMS & Execution Core**: `cd services/aq-engine-go && go test -v -count=1 ./...` $\to$ **100% PASS across all packages**
+- **Python Research & FastAPI**: `python -m pytest tests/ -q` $\to$ **114 / 114 PASS (43.6s)**
+- **Frontend Workstation**: `cd frontend && npm run build` $\to$ **0 Errors (518 kB clean bundle)**
 - **Working Tree**: Completely clean, secret-scanned, `.env` git-ignored, all commits on `main`.
+- **AI Agent Skill**: Authoritative skill defined in [`.agents/skills/ai-quant-engineer/SKILL.md`](file:///d:/Main/ai-quant/ai_quant_platform/.agents/skills/ai-quant-engineer/SKILL.md).
 
 ---
 

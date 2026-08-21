@@ -21,6 +21,7 @@ const (
 	EventOrderSubmitFailed   JournalEventType = "ORDER_SUBMIT_FAILED"
 	EventSubmissionUnknown   JournalEventType = "SUBMISSION_UNKNOWN"
 	EventFillRecorded        JournalEventType = "FILL_RECORDED"
+	EventCancelRequested     JournalEventType = "CANCEL_REQUESTED"
 	EventOrderCanceled       JournalEventType = "ORDER_CANCELED"
 	EventEngineFrozen        JournalEventType = "ENGINE_FROZEN"
 	EventEngineUnfrozen      JournalEventType = "ENGINE_UNFROZEN"

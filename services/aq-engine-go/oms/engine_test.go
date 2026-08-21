@@ -20,9 +20,11 @@ type mockBroker struct {
 	mu                sync.Mutex
 	submitCalls       int
 	getOrderCalls     int
+	cancelCalls       int
 	shouldFail        bool
 	failErr           error
 	getOrderErr       error
+	cancelErr         error
 	acceptBeforeError bool
 	orders            map[string]broker.BrokerOrder
 }
@@ -42,7 +44,12 @@ func (m *mockBroker) Name() string                    { return "mock-broker" }
 func (m *mockBroker) Kind() broker.BrokerKind         { return broker.BrokerKindPaper }
 func (m *mockBroker) Environment() broker.Environment { return broker.EnvSimulation }
 func (m *mockBroker) IsConfigured() bool              { return true }
-func (m *mockBroker) CancelOrder(id string) error     { return nil }
+func (m *mockBroker) CancelOrder(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cancelCalls++
+	return m.cancelErr
+}
 func (m *mockBroker) GetOrder(id string) (*broker.BrokerOrder, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1466,6 +1473,130 @@ func TestConcurrentDistinctOrdersCannotExceedCapacityRace(t *testing.T) {
 		t.Fatalf("Expected exactly 1 order approved under concurrent race; got %d", approvedCount)
 	}
 }
+
+// 18. Test: RequestCancel transitions to CANCEL_PENDING and dispatches broker cancel
+func TestRequestCancel_TransitionsToCancelPendingAndDispatchesBrokerCancel(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	mb := newMockBroker(false, nil)
+
+	ord := &models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            10,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "cancel-req-1",
+	}
+
+	// Submit order -> ACKNOWLEDGED
+	_, dec, err := engine.Submit(ord, mb)
+	if err != nil || !dec.Approved {
+		t.Fatalf("Failed to submit initial order: %v", err)
+	}
+
+	// Request cancel
+	canceledOrd, err := engine.RequestCancel("cancel-req-1", mb, "operator requested cancel")
+	if err != nil {
+		t.Fatalf("Expected RequestCancel to succeed, got: %v", err)
+	}
+	if canceledOrd.Status != models.OrderStatusCancelPending {
+		t.Fatalf("Expected status CANCEL_PENDING, got %s", canceledOrd.Status)
+	}
+	if mb.cancelCalls != 1 {
+		t.Fatalf("Expected broker CancelOrder called once, got %d", mb.cancelCalls)
+	}
+
+	// Confirm cancel -> CANCELLED
+	err = engine.ConfirmCancel("cancel-req-1", "broker confirmed cancel")
+	if err != nil {
+		t.Fatalf("Expected ConfirmCancel to succeed, got: %v", err)
+	}
+
+	histOrd, _ := engine.GetOrderByClientID("cancel-req-1")
+	if histOrd.Status != models.OrderStatusCancelled {
+		t.Fatalf("Expected status CANCELLED after confirmation, got %s", histOrd.Status)
+	}
+}
+
+// 19. Test: Late fill after cancel request is successfully processed
+func TestLateFillAfterCancelRequest_SuccessfullyApplies(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	mb := newMockBroker(false, nil)
+
+	ord := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideBuy,
+		Qty:            20,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "late-fill-1",
+	}
+
+	_, _, err := engine.Submit(ord, mb)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	// Request cancel -> CANCEL_PENDING
+	_, err = engine.RequestCancel("late-fill-1", mb, "cancel before fill")
+	if err != nil {
+		t.Fatalf("RequestCancel failed: %v", err)
+	}
+
+	// Late fill arrives from broker stream
+	pos, err := engine.ApplyFill(models.Fill{
+		FillID:        "fill-late-nvda",
+		BrokerOrderID: "mock-1",
+		ClientOrderID: "late-fill-1",
+		Symbol:        "NVDA",
+		Side:          models.SideBuy,
+		Qty:           20,
+		Price:         100.0,
+		Timestamp:     time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("ApplyFill must succeed on late fill, got: %v", err)
+	}
+	if pos.Qty != 20 {
+		t.Fatalf("Expected position 20, got %.2f", pos.Qty)
+	}
+
+	// Order status is updated to FILLED
+	histOrd, _ := engine.GetOrderByClientID("late-fill-1")
+	if histOrd.Status != models.OrderStatusFilled {
+		t.Fatalf("Expected order status FILLED after full late fill, got %s", histOrd.Status)
+	}
+}
+
+// 20. Test: CancelAllOpenOrders cancels all active in-flight orders
+func TestCancelAllOpenOrders_CancelsAllInFlight(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	mb := newMockBroker(false, nil)
+
+	for i := 1; i <= 3; i++ {
+		ord := &models.OrderIntent{
+			Symbol:         "AAPL",
+			Side:           models.SideBuy,
+			Qty:            5,
+			ReferencePrice: 150.0,
+			ClientOrderID:  fmt.Sprintf("multi-cancel-%d", i),
+		}
+		_, _, _ = engine.Submit(ord, mb)
+	}
+
+	canceled, err := engine.CancelAllOpenOrders(mb, "emergency kill cancel-all")
+	if err != nil {
+		t.Fatalf("CancelAllOpenOrders failed: %v", err)
+	}
+	if len(canceled) != 3 {
+		t.Fatalf("Expected 3 orders canceled, got %d", len(canceled))
+	}
+	if mb.cancelCalls != 3 {
+		t.Fatalf("Expected 3 broker CancelOrder calls, got %d", mb.cancelCalls)
+	}
+}
+
 
 
 

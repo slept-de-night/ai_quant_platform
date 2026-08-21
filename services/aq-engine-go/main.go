@@ -441,7 +441,60 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		})
 	})
 
-	// 5. Market Tick Query
+	// 5. Order Cancellation
+	handleCancelOrder := func(w http.ResponseWriter, r *http.Request, clientOrderID string, reason string) {
+		if strings.TrimSpace(clientOrderID) == "" {
+			http.Error(w, "missing client_order_id", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(reason) == "" {
+			reason = "operator cancellation request"
+		}
+
+		activeBroker, err := brokerReg.GetActive()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		ord, cancelErr := engine.RequestCancel(clientOrderID, activeBroker, reason)
+		if cancelErr != nil && ord == nil {
+			http.Error(w, cancelErr.Error(), http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		status := "cancel_pending"
+		if ord != nil {
+			status = string(ord.Status)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"client_order_id": clientOrderID,
+			"status":          status,
+			"order":           ord,
+			"error":           func() string { if cancelErr != nil { return cancelErr.Error() }; return "" }(),
+		})
+	}
+
+	mux.HandleFunc("POST /api/v1/orders/{client_order_id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		clientOrderID := r.PathValue("client_order_id")
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		handleCancelOrder(w, r, clientOrderID, req.Reason)
+	})
+
+	mux.HandleFunc("POST /api/v1/orders/cancel", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ClientOrderID string `json:"client_order_id"`
+			Reason        string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		handleCancelOrder(w, r, req.ClientOrderID, req.Reason)
+	})
+
+	// 6. Market Tick Query
 	mux.HandleFunc("GET /api/v1/market/tick", func(w http.ResponseWriter, r *http.Request) {
 		symbol := r.URL.Query().Get("symbol")
 		if symbol == "" {
@@ -455,7 +508,7 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		})
 	})
 
-	// 6. Market Tick Ingestion
+	// 7. Market Tick Ingestion
 	mux.HandleFunc("POST /api/v1/market/tick", func(w http.ResponseWriter, r *http.Request) {
 		var tick models.MarketTick
 		if err := json.NewDecoder(r.Body).Decode(&tick); err != nil {
@@ -475,7 +528,32 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		})
 	})
 
-	// 7. Emergency Global Kill Switch
+	// 8. Execution Freezing (FREEZE_NEW_ORDERS)
+	mux.HandleFunc("POST /api/v1/risk/freeze", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Reason      string `json:"reason"`
+			RequestedBy string `json:"requested_by"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Reason == "" {
+			req.Reason = "New order submissions frozen by operator"
+		}
+		if req.RequestedBy == "" {
+			req.RequestedBy = "operator"
+		}
+
+		engine.FreezeWithReason(req.Reason, req.RequestedBy, "")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    "frozen",
+			"is_frozen": true,
+			"reason":    req.Reason,
+			"message":   "Execution frozen: All new order submissions are BLOCKED",
+			"timestamp": time.Now().UTC(),
+		})
+	})
+
+	// 9. Emergency Global Kill Switch (EMERGENCY_KILL: Freeze + Cancel-All Open Orders + Reconcile)
 	mux.HandleFunc("POST /api/v1/risk/kill", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Reason      string `json:"reason"`
@@ -489,14 +567,37 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			req.RequestedBy = "operator"
 		}
 
+		// 1. Freeze new submissions immediately
 		engine.FreezeWithReason(req.Reason, req.RequestedBy, "")
+
+		// 2. Query active broker and request cancellation on all open orders
+		var canceledOrders []models.OrderIntent
+		activeBroker, err := brokerReg.GetActive()
+		if err == nil && activeBroker != nil {
+			canceledOrders, _ = engine.CancelAllOpenOrders(activeBroker, "emergency kill cancel-all")
+		}
+
+		// 3. Trigger immediate post-kill reconciliation
+		var reconDiff *reconciliation.Diff
+		if activeBroker != nil {
+			brokerSnapshot, snapErr := activeBroker.GetBrokerSnapshot()
+			if snapErr == nil && brokerSnapshot != nil {
+				localSnapshot := engine.ConstructLocalSnapshot()
+				diff := reconciler.Reconcile(localSnapshot, *brokerSnapshot)
+				reconDiff = &diff
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":    "frozen",
-			"is_frozen": true,
-			"reason":    req.Reason,
-			"message":   "Emergency Kill Switch ENGAGED: All new order submissions are BLOCKED",
-			"timestamp": time.Now().UTC(),
+			"status":                "killed",
+			"is_frozen":             true,
+			"reason":                req.Reason,
+			"canceled_orders_count": len(canceledOrders),
+			"canceled_orders":       canceledOrders,
+			"reconciliation":        reconDiff,
+			"message":               "Emergency Kill Switch ENGAGED: All new submissions blocked, open orders cancellation requested, and broker state reconciled",
+			"timestamp":             time.Now().UTC(),
 		})
 	})
 

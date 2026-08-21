@@ -436,3 +436,75 @@ func TestHTTPBrokerSwitchInvalidatesReconciliationAndFreezes(t *testing.T) {
 		t.Fatalf("Expected 409 Conflict when unfreezing without new broker reconciliation, got %d", unfreezeW.Code)
 	}
 }
+
+func TestHTTPOrderCancelEndpoint(t *testing.T) {
+	mux, engine, _, _ := setupTestServer()
+
+	// 1. Submit an order
+	order := models.OrderIntent{
+		Symbol:         "MSFT",
+		Side:           models.SideBuy,
+		Qty:            10,
+		ReferencePrice: 300.0,
+		ClientOrderID:  "http-cancel-1",
+	}
+	body, _ := json.Marshal(order)
+	req := httptest.NewRequest("POST", "/api/v1/orders/submit", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Submit failed: %d", w.Code)
+	}
+
+	// 2. Request cancel via path parameter
+	cancelReq := httptest.NewRequest("POST", "/api/v1/orders/http-cancel-1/cancel", bytes.NewReader([]byte(`{"reason":"user canceled"}`)))
+	cancelW := httptest.NewRecorder()
+	mux.ServeHTTP(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("Cancel endpoint failed: %d - %s", cancelW.Code, cancelW.Body.String())
+	}
+
+	var cancelRes map[string]interface{}
+	json.NewDecoder(cancelW.Body).Decode(&cancelRes)
+	if cancelRes["status"] != "CANCEL_PENDING" {
+		t.Fatalf("Expected CANCEL_PENDING, got %v", cancelRes["status"])
+	}
+
+	ord, _ := engine.GetOrderByClientID("http-cancel-1")
+	if ord.Status != models.OrderStatusCancelPending {
+		t.Fatalf("Expected order in OMS to be CANCEL_PENDING, got %s", ord.Status)
+	}
+}
+
+func TestHTTPFreezeAndEmergencyKill(t *testing.T) {
+	mux, engine, _, _ := setupTestServer()
+
+	// 1. POST /api/v1/risk/freeze
+	freezeReq := httptest.NewRequest("POST", "/api/v1/risk/freeze", bytes.NewReader([]byte(`{"reason":"routine pause"}`)))
+	freezeW := httptest.NewRecorder()
+	mux.ServeHTTP(freezeW, freezeReq)
+
+	if freezeW.Code != http.StatusOK {
+		t.Fatalf("Freeze failed: %d", freezeW.Code)
+	}
+	if !engine.IsFrozen() {
+		t.Fatalf("Engine must be frozen after POST /api/v1/risk/freeze")
+	}
+
+	// 2. POST /api/v1/risk/kill (Emergency Kill)
+	killReq := httptest.NewRequest("POST", "/api/v1/risk/kill", bytes.NewReader([]byte(`{"reason":"emergency kill test"}`)))
+	killW := httptest.NewRecorder()
+	mux.ServeHTTP(killW, killReq)
+
+	if killW.Code != http.StatusOK {
+		t.Fatalf("Kill failed: %d", killW.Code)
+	}
+
+	var killRes map[string]interface{}
+	json.NewDecoder(killW.Body).Decode(&killRes)
+	if killRes["status"] != "killed" || killRes["is_frozen"] != true {
+		t.Fatalf("Expected killed status and is_frozen=true, got: %v", killRes)
+	}
+}
+

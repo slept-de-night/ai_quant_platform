@@ -445,6 +445,8 @@ func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status model
 		evtType = EventOrderSubmitFailed
 	case models.OrderStatusCancelled:
 		evtType = EventOrderCanceled
+	case models.OrderStatusCancelPending:
+		evtType = EventCancelRequested
 	case models.OrderStatusSubmissionUnknown:
 		evtType = EventSubmissionUnknown
 	}
@@ -805,6 +807,21 @@ func (e *Engine) replayEvent(evt JournalEvent) {
 				}
 			}
 		}
+	case EventCancelRequested:
+		if ord, ok := e.orderHistory[evt.ClientOrderID]; ok {
+			ord.Status = models.OrderStatusCancelPending
+			if evt.Reason != "" {
+				ord.Reason = evt.Reason
+			}
+			ord.UpdatedAt = evt.Timestamp
+			e.orderHistory[evt.ClientOrderID] = ord
+			for i := range e.orderList {
+				if e.orderList[i].ClientOrderID == evt.ClientOrderID {
+					e.orderList[i] = ord
+					break
+				}
+			}
+		}
 	case EventOrderCanceled:
 		if ord, ok := e.orderHistory[evt.ClientOrderID]; ok {
 			ord.Status = models.OrderStatusCancelled
@@ -1024,5 +1041,124 @@ func (e *Engine) ConstructLocalSnapshot() reconciliation.LocalState {
 		Equity:    e.portfolio.Equity,
 		Timestamp: now,
 	}
+}
+
+// RequestCancel transitions an order to CANCEL_PENDING, journals the event, and submits a cancellation request to the broker.
+// Note: A cancel request is NOT a confirmed cancellation. Confirmed cancellation happens when broker confirms CANCELED.
+// Late fills that occur after a cancel request are still fully processed by ApplyFill.
+func (e *Engine) RequestCancel(clientOrderID string, b broker.BrokerAdapter, reason string) (*models.OrderIntent, error) {
+	e.mu.Lock()
+
+	if !e.journalReady {
+		e.mu.Unlock()
+		return nil, errors.New("cannot cancel order: durable journal is not ready")
+	}
+
+	ord, exists := e.orderHistory[clientOrderID]
+	if !exists {
+		e.mu.Unlock()
+		return nil, fmt.Errorf("order not found: %s", clientOrderID)
+	}
+
+	// If already in terminal status
+	if ord.Status == models.OrderStatusCancelled ||
+		ord.Status == models.OrderStatusFilled ||
+		ord.Status == models.OrderStatusRejected ||
+		ord.Status == models.OrderStatusSubmitFailed ||
+		ord.Status == models.OrderStatusExpired {
+		e.mu.Unlock()
+		return nil, fmt.Errorf("order %s cannot be canceled in terminal status %s", clientOrderID, ord.Status)
+	}
+
+	if ord.Status == models.OrderStatusCancelPending {
+		// Idempotent: already cancel pending
+		ordCopy := ord
+		e.mu.Unlock()
+		if b != nil {
+			_ = b.CancelOrder(clientOrderID)
+		}
+		return &ordCopy, nil
+	}
+
+	// 1. Journal write-ahead CANCEL_REQUESTED
+	if err := e.recordEventLocked(EventCancelRequested, nil, nil, clientOrderID, ord.BrokerOrderID, reason); err != nil {
+		e.mu.Unlock()
+		return nil, fmt.Errorf("failed to journal cancel request: %w", err)
+	}
+
+	// 2. Transition local order to CANCEL_PENDING
+	ord.Status = models.OrderStatusCancelPending
+	if reason != "" {
+		ord.Reason = reason
+	}
+	ord.UpdatedAt = time.Now().UTC()
+	e.orderHistory[clientOrderID] = ord
+	for i := range e.orderList {
+		if e.orderList[i].ClientOrderID == clientOrderID {
+			e.orderList[i] = ord
+			break
+		}
+	}
+	ordCopy := ord
+	e.mu.Unlock()
+
+	// 3. Dispatch cancellation request to broker
+	if b != nil {
+		cancelErr := b.CancelOrder(clientOrderID)
+		if cancelErr != nil {
+			// Broker cancel request returned an error.
+			// If broker error indicates already filled or canceled, query broker to see current state.
+			queryResp, queryErr := b.GetOrder(clientOrderID)
+			if queryErr == nil && queryResp != nil {
+				if queryResp.Status == broker.BrokerOrderStatusFilled {
+					_ = e.UpdateOrderStatus(clientOrderID, models.OrderStatusFilled, "broker confirmed filled prior to cancel")
+				} else if queryResp.Status == broker.BrokerOrderStatusCanceled {
+					_ = e.UpdateOrderStatus(clientOrderID, models.OrderStatusCancelled, "broker confirmed canceled")
+				}
+			}
+			return &ordCopy, cancelErr
+		}
+	}
+
+	return &ordCopy, nil
+}
+
+// ConfirmCancel confirms that an order is officially canceled by the broker and releases all reservations.
+func (e *Engine) ConfirmCancel(clientOrderID string, reason string) error {
+	return e.UpdateOrderStatus(clientOrderID, models.OrderStatusCancelled, reason)
+}
+
+// CancelAllOpenOrders iterates over all active/open orders in the OMS and requests cancellation on the broker.
+func (e *Engine) CancelAllOpenOrders(b broker.BrokerAdapter, reason string) ([]models.OrderIntent, error) {
+	e.mu.RLock()
+	var openOrderIDs []string
+	for _, ord := range e.orderList {
+		switch ord.Status {
+		case models.OrderStatusSubmitting,
+			models.OrderStatusSubmissionUnknown,
+			models.OrderStatusAcknowledged,
+			models.OrderStatusPartiallyFilled,
+			models.OrderStatusCancelPending:
+			openOrderIDs = append(openOrderIDs, ord.ClientOrderID)
+		}
+	}
+	e.mu.RUnlock()
+
+	var canceled []models.OrderIntent
+	var errs []string
+	for _, id := range openOrderIDs {
+		ord, err := e.RequestCancel(id, b, reason)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", id, err))
+		}
+		if ord != nil {
+			canceled = append(canceled, *ord)
+		}
+	}
+
+	if len(errs) > 0 {
+		return canceled, fmt.Errorf("errors cancelling open orders: %s", strings.Join(errs, "; "))
+	}
+	return canceled, nil
 }
 

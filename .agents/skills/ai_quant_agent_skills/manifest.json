@@ -1,0 +1,46 @@
+{
+  "project": "AI Quant Platform v1.4",
+  "skill_count": 10,
+  "skills": [
+    {
+      "id": "00-project-orchestrator",
+      "file": "00-project-orchestrator/SKILL.md"
+    },
+    {
+      "id": "01-real-money-oms-safety",
+      "file": "01-real-money-oms-safety/SKILL.md"
+    },
+    {
+      "id": "02-webull-openapi",
+      "file": "02-webull-openapi/SKILL.md"
+    },
+    {
+      "id": "03-reconciliation-broker-truth",
+      "file": "03-reconciliation-broker-truth/SKILL.md"
+    },
+    {
+      "id": "04-pit-data-provenance",
+      "file": "04-pit-data-provenance/SKILL.md"
+    },
+    {
+      "id": "05-ai-runtime-efficiency",
+      "file": "05-ai-runtime-efficiency/SKILL.md"
+    },
+    {
+      "id": "06-financial-explainability-ui",
+      "file": "06-financial-explainability-ui/SKILL.md"
+    },
+    {
+      "id": "07-testing-ci-certification",
+      "file": "07-testing-ci-certification/SKILL.md"
+    },
+    {
+      "id": "08-repo-security-git-hygiene",
+      "file": "08-repo-security-git-hygiene/SKILL.md"
+    },
+    {
+      "id": "09-observability-operations",
+      "file": "09-observability-operations/SKILL.md"
+    }
+  ]
+}

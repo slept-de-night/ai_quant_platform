@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { StrategyItem, BrokerHealthSummary, ReconciliationReport } from '../../types';
+import { StrategyItem, BrokerHealthSummary, ReconciliationReport, ReadinessReport, ReconciliationState } from '../../types';
 import { api } from '../../services/api';
 import {
   ShieldCheck,
@@ -21,11 +21,13 @@ import {
 interface PaperTradingDeskViewProps {
   selectedSymbol: string;
   strategies: StrategyItem[];
+  readiness?: ReadinessReport | null;
 }
 
 export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
   selectedSymbol,
   strategies,
+  readiness,
 }) => {
   const [selectedStrategy, setSelectedStrategy] = useState<string>('trend_momentum');
   const [cycleData, setCycleData] = useState<any>(null);
@@ -38,6 +40,8 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
   const [brokerHealth, setBrokerHealth] = useState<BrokerHealthSummary | null>(null);
   const [reconciliation, setReconciliation] = useState<ReconciliationReport | null>(null);
   const [isReconciling, setIsReconciling] = useState(false);
+  const [reconRunError, setReconRunError] = useState<string | null>(null);
+  const [isSwitchingBroker, setIsSwitchingBroker] = useState(false);
   const [isTogglingKill, setIsTogglingKill] = useState(false);
 
   const fetchCycle = async () => {
@@ -77,23 +81,75 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
 
   const handleRunReconciliation = async () => {
     setIsReconciling(true);
+    setReconRunError(null);
     try {
       const res = await api.runReconciliation();
       setReconciliation(res);
+      setReconRunError(null);
       await fetchCycle();
     } catch (err: any) {
+      setReconciliation(null);
+      setReconRunError(err.message || 'Reconciliation run failed');
       setError(err.message || 'Reconciliation run failed');
     } finally {
       setIsReconciling(false);
     }
   };
 
+  // Explicit, authoritative reconciliation state machine. A missing result
+  // must NEVER render as a clean audit.
+  const reconState: ReconciliationState = ((): ReconciliationState => {
+    if (isReconciling) return 'RUNNING';
+    if (reconRunError) return 'FAILED';
+    if (reconciliation) {
+      if (readiness?.reconciliation?.status === 'STALE') return 'STALE';
+      if (readiness?.reconciliation?.status === 'FAILED') return 'FAILED';
+      if (reconciliation.has_critical || reconciliation.critical_count > 0) return 'MISMATCH';
+      if (readiness?.reconciliation?.status === 'MISMATCH') return 'MISMATCH';
+      return 'HEALTHY';
+    }
+    if (readiness?.reconciliation) {
+      const s = readiness.reconciliation.status;
+      if (s === 'CLEAN') return 'HEALTHY';
+      if (s === 'MISMATCH') return 'MISMATCH';
+      if (s === 'FAILED') return 'FAILED';
+      if (s === 'STALE') return 'STALE';
+      return 'NOT_RUN';
+    }
+    return 'NOT_RUN';
+  })();
+
+  const reconBadge = (() => {
+    switch (reconState) {
+      case 'HEALTHY':
+        return 'bg-accent-emerald/20 text-accent-emerald border-accent-emerald/40';
+      case 'MISMATCH':
+      case 'FAILED':
+        return 'bg-accent-rose/20 text-accent-rose border-accent-rose/40';
+      case 'STALE':
+        return 'bg-accent-amber/20 text-accent-amber border-accent-amber/40';
+      case 'RUNNING':
+        return 'bg-accent-cyan/20 text-accent-cyan border-accent-cyan/40';
+      default:
+        return 'bg-slate-500/20 text-slate-400 border-slate-500/40';
+    }
+  })();
+
+  const brokerConfigured = brokerHealth?.configured ?? readiness?.broker_configured ?? null;
+  const brokerConnected = brokerHealth?.connected ?? readiness?.broker_connected ?? null;
+  const brokerReady = brokerHealth?.ready ?? readiness?.broker_ready ?? null;
+  const activeBrokerName = brokerHealth?.active_broker || readiness?.active_broker || null;
+  const brokerEnvironment = (brokerHealth?.environment || readiness?.execution_mode || 'UNKNOWN').toUpperCase();
+
   const handleBrokerSwitch = async (name: string) => {
+    setIsSwitchingBroker(true);
     try {
       await api.selectBroker(name);
       await fetchCycle();
     } catch (err: any) {
       setError(err.message || 'Failed to switch broker');
+    } finally {
+      setIsSwitchingBroker(false);
     }
   };
 
@@ -113,7 +169,7 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
     }
   };
 
-  const isFrozen = cycleData?.portfolio?.is_frozen || false;
+  const isFrozen = cycleData?.portfolio?.is_frozen || readiness?.is_frozen || false;
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-background">
@@ -125,15 +181,19 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
               EXECUTION DESK
             </span>
             <span className="text-xs text-slate-400 font-mono">
-              Broker: <strong className="text-white">{brokerHealth?.active_broker || 'Paper Sim / Go Core'}</strong>
+              Broker: <strong className="text-white">{activeBrokerName || 'UNKNOWN'}</strong>
             </span>
             {isFrozen ? (
               <span className="px-2 py-0.5 text-xs font-mono font-bold bg-accent-rose/20 text-accent-rose border border-accent-rose/40 rounded animate-pulse">
                 OMS FROZEN
               </span>
-            ) : (
+            ) : readiness?.trading_readiness === 'READY' ? (
               <span className="px-2 py-0.5 text-xs font-mono font-bold bg-accent-emerald/20 text-accent-emerald border border-accent-emerald/40 rounded">
                 OMS READY
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 text-xs font-mono font-bold bg-accent-amber/20 text-accent-amber border border-accent-amber/40 rounded">
+                {readiness ? 'OMS NOT READY' : 'OMS UNKNOWN'}
               </span>
             )}
           </div>
@@ -203,36 +263,56 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
               <Server className="w-4 h-4 text-accent-cyan" />
               <span className="font-bold text-slate-100 uppercase">Execution Broker</span>
             </div>
-            <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${
-              brokerHealth?.ready ? 'bg-accent-emerald/20 text-accent-emerald' : 'bg-accent-amber/20 text-accent-amber'
-            }`}>
-              {brokerHealth?.ready ? 'CONNECTED' : 'OFFLINE'}
+            <span className={`px-2 py-0.5 text-[10px] font-bold rounded bg-slate-500/20 text-slate-300 border border-slate-500/40`}
+              title="Configured / Connected / Ready are reported separately below">
+              {activeBrokerName ? brokerEnvironment : 'UNKNOWN'}
             </span>
           </div>
 
           <div className="space-y-2">
             <label className="text-[10px] text-slate-400">Select Active Execution Adapter</label>
             <select
-              value={brokerHealth?.active_broker || 'paper-simulation'}
-              onChange={(e) => handleBrokerSwitch(e.target.value)}
-              className="w-full bg-background border border-card-border rounded px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-accent-cyan cursor-pointer"
+              value={activeBrokerName || ''}
+              onChange={(e) => { if (e.target.value) handleBrokerSwitch(e.target.value); }}
+              disabled={isSwitchingBroker}
+              className="w-full bg-background border border-card-border rounded px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-accent-cyan cursor-pointer disabled:opacity-60"
             >
+              <option value="" disabled>UNKNOWN</option>
               {brokerHealth?.all_registered_brokers?.map((b) => (
                 <option key={b.name} value={b.name}>
-                  {b.name} ({b.environment.toUpperCase()}) {b.ready ? '● Ready' : '○ Standby'}
+                  {b.name} ({String(b.environment || 'UNKNOWN').toUpperCase()}) {b.ready ? '● Ready' : '○ Standby'}
                 </option>
-              )) || <option value="paper-simulation">paper-simulation (SIMULATION)</option>}
+              ))}
             </select>
+            {isSwitchingBroker && <div className="text-[10px] text-accent-amber font-semibold">SWITCHING...</div>}
           </div>
 
           <div className="p-3 rounded bg-background border border-card-border space-y-1 text-[11px]">
             <div className="flex justify-between text-slate-400">
+              <span>Configured</span>
+              <span className={`font-bold ${brokerConfigured === null ? 'text-slate-400' : brokerConfigured ? 'text-accent-emerald' : 'text-accent-rose'}`}>
+                {brokerConfigured === null ? 'UNKNOWN' : brokerConfigured ? 'YES' : 'NO'}
+              </span>
+            </div>
+            <div className="flex justify-between text-slate-400">
+              <span>Connected</span>
+              <span className={`font-bold ${brokerConnected === null ? 'text-slate-400' : brokerConnected ? 'text-accent-emerald' : 'text-accent-amber'}`}>
+                {brokerConnected === null ? 'UNKNOWN' : brokerConnected ? 'YES' : 'NO'}
+              </span>
+            </div>
+            <div className="flex justify-between text-slate-400">
+              <span>Ready</span>
+              <span className={`font-bold ${brokerReady === null ? 'text-slate-400' : brokerReady ? 'text-accent-emerald' : 'text-accent-rose'}`}>
+                {brokerReady === null ? 'UNKNOWN' : brokerReady ? 'YES' : 'NO'}
+              </span>
+            </div>
+            <div className="flex justify-between text-slate-400">
               <span>Environment</span>
-              <span className="text-slate-200 font-bold">{brokerHealth?.environment?.toUpperCase() || 'SIMULATION'}</span>
+              <span className="text-slate-200 font-bold">{brokerEnvironment}</span>
             </div>
             <div className="flex justify-between text-slate-400">
               <span>Adapter Status</span>
-              <span className="text-slate-200">{brokerHealth?.message || 'Ready'}</span>
+              <span className="text-slate-200">{brokerHealth?.message || 'UNKNOWN'}</span>
             </div>
           </div>
         </div>
@@ -255,19 +335,50 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
 
           <div className="p-3 rounded bg-background border border-card-border space-y-2">
             <div className="flex justify-between items-center">
+              <span className="text-slate-400">Reconciliation State:</span>
+              <span className={`px-2 py-0.5 text-[10px] font-bold rounded border ${reconBadge}`}>
+                {reconState}
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
               <span className="text-slate-400">Discrepancy Count:</span>
               <span className={`font-bold ${
-                reconciliation?.total_count ? 'text-accent-rose' : 'text-accent-emerald'
+                !reconciliation ? 'text-slate-500'
+                : reconciliation.total_count ? 'text-accent-rose'
+                : 'text-accent-emerald'
               }`}>
-                {reconciliation?.total_count || 0} Total ({reconciliation?.critical_count || 0} Critical)
+                {reconciliation ? `${reconciliation.total_count} Total (${reconciliation.critical_count} Critical)` : '—'}
               </span>
             </div>
             <div className="flex justify-between items-center text-[10px] text-slate-400">
               <span>Audit Status:</span>
-              <span className="text-slate-300">
-                {reconciliation?.has_critical ? 'CRITICAL DISCREPANCY DETECTED' : 'LEDGER MATCHES BROKER'}
+              <span className={reconState === 'HEALTHY' ? 'text-accent-emerald font-semibold' : 'text-slate-300'}>
+                {reconState === 'HEALTHY'
+                  ? 'LEDGER MATCHES BROKER'
+                  : reconState === 'MISMATCH'
+                  ? 'CRITICAL DISCREPANCY DETECTED'
+                  : reconState === 'FAILED'
+                  ? 'RECONCILIATION FAILED'
+                  : reconState === 'STALE'
+                  ? 'RECONCILIATION STALE'
+                  : reconState === 'RUNNING'
+                  ? 'RECONCILIATION IN PROGRESS'
+                  : reconState === 'NOT_RUN'
+                  ? 'NOT RUN'
+                  : 'UNKNOWN'}
               </span>
             </div>
+            {readiness?.reconciliation?.last_run_at && (
+              <div className="flex justify-between items-center text-[10px] text-slate-500">
+                <span>Last Reconciliation:</span>
+                <span>{new Date(readiness.reconciliation.last_run_at).toLocaleTimeString()} UTC</span>
+              </div>
+            )}
+            {reconState === 'FAILED' && reconRunError && (
+              <div className="text-[10px] text-accent-rose">
+                {reconRunError}
+              </div>
+            )}
           </div>
 
           {reconciliation?.discrepancies && reconciliation.discrepancies.length > 0 && (
@@ -381,7 +492,7 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
             </div>
 
             <p className="text-xs text-slate-400 leading-relaxed">
-              Submits paper order to {brokerHealth?.active_broker || 'Selected Broker Adapter'} only if all pre-trade risk gates are verified and OMS is unfrozen.
+              Submits paper order to {activeBrokerName || 'UNKNOWN'} only if all pre-trade risk gates are verified and OMS is unfrozen.
             </p>
           </div>
 

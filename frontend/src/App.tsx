@@ -192,6 +192,7 @@ export const App: React.FC = () => {
             <PaperTradingDeskView
               selectedSymbol={selectedSymbol}
               strategies={strategies}
+              readiness={readiness}
             />
           )}
 

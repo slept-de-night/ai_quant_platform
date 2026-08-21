@@ -44,28 +44,47 @@ export const Header: React.FC<HeaderProps> = ({
   const [time, setTime] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
-  const [activeBroker, setActiveBroker] = useState<string>('webull-main');
+  const [activeBroker, setActiveBroker] = useState<string | null>(null);
+  const [isSwitchingBroker, setIsSwitchingBroker] = useState<boolean>(false);
+  const [brokerSwitchError, setBrokerSwitchError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Sync active broker from platform status or API
+    // Sync active broker from authoritative backend state. Do NOT assume a
+    // broker before the execution engine reports one.
     const fetchBrokers = async () => {
       try {
         const res = await api.listBrokers();
-        if (res?.active) setActiveBroker(res.active);
+        if (typeof res?.active === 'string' && res.active) {
+          setActiveBroker(res.active);
+        }
       } catch (e) {
-        // fallback
+        // Leave activeBroker as null (UNKNOWN) until backend confirms venue.
       }
     };
     fetchBrokers();
   }, [status]);
 
   const handleBrokerChange = async (newBroker: string) => {
+    if (isSwitchingBroker || newBroker === activeBroker) return;
+    const previousBroker = activeBroker;
+    setIsSwitchingBroker(true);
+    setBrokerSwitchError(null);
     try {
-      setActiveBroker(newBroker);
       await api.selectBroker(newBroker);
+      // Backend confirmed; re-read authoritative state rather than trusting
+      // the optimistic selection.
+      const res = await api.listBrokers();
+      if (typeof res?.active === 'string' && res.active) {
+        setActiveBroker(res.active);
+      }
       onRefresh();
     } catch (e) {
+      // Switch failed. Active broker remains the previously confirmed venue.
+      setActiveBroker(previousBroker);
+      setBrokerSwitchError(`Switch failed. Active broker remains ${previousBroker ?? 'UNKNOWN'}.`);
       console.error('Failed to switch broker:', e);
+    } finally {
+      setIsSwitchingBroker(false);
     }
   };
 
@@ -191,18 +210,37 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Pluggable Broker Venue Selector */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-background border border-card-border font-mono text-xs">
-            <Server className="w-3.5 h-3.5 text-accent-blue" />
-            <span className="text-slate-400 text-[10px] hidden md:inline">BROKER:</span>
-            <select
-              value={activeBroker}
-              onChange={(e) => handleBrokerChange(e.target.value)}
-              className="bg-card border border-card-border text-slate-200 text-xs rounded px-1.5 py-0.5 font-bold focus:outline-none focus:border-accent-cyan cursor-pointer"
-            >
-              <option value="webull-main">Webull (Main)</option>
-              <option value="alpaca-paper">Alpaca Paper</option>
-              <option value="paper-simulation">Paper Sim</option>
-            </select>
+          <div className="flex flex-col items-end gap-0.5 px-2.5 py-1 rounded bg-background border border-card-border font-mono text-xs">
+            <div className="flex items-center gap-1.5">
+              <Server className="w-3.5 h-3.5 text-accent-blue" />
+              <span className="text-slate-400 text-[10px] hidden md:inline">BROKER:</span>
+              <select
+                value={activeBroker ?? ''}
+                onChange={(e) => { if (e.target.value) handleBrokerChange(e.target.value); }}
+                disabled={isSwitchingBroker}
+                className="bg-card border border-card-border text-slate-200 text-xs rounded px-1.5 py-0.5 font-bold focus:outline-none focus:border-accent-cyan cursor-pointer disabled:opacity-60"
+                title={activeBroker ? `Active venue: ${activeBroker}` : 'No authoritative broker state received from backend yet'}
+              >
+                <option value="" disabled>{activeBroker ? 'BROKER UNKNOWN' : 'UNKNOWN'}</option>
+                <option value="webull-main">Webull (Main)</option>
+                <option value="alpaca-paper">Alpaca Paper</option>
+                <option value="paper-simulation">Paper Sim</option>
+              </select>
+            </div>
+            <div className="text-[9px] leading-none">
+              {isSwitchingBroker ? (
+                <span className="text-accent-amber font-semibold">SWITCHING...</span>
+              ) : activeBroker ? (
+                <span className="text-slate-500">{activeBroker.toUpperCase()}</span>
+              ) : (
+                <span className="text-slate-500">LOADING / UNKNOWN</span>
+              )}
+              {brokerSwitchError && (
+                <span className="text-accent-rose font-semibold block max-w-[180px] truncate" title={brokerSwitchError}>
+                  {brokerSwitchError}
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Emergency Kill Switch / Freeze State */}
@@ -233,9 +271,31 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Engine Status */}
           <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded bg-background border border-card-border font-mono text-xs">
-            <span className={`w-2 h-2 rounded-full ${status?.go_engine?.status === 'offline' ? 'bg-accent-rose' : 'bg-accent-emerald animate-pulse'}`}></span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                status?.go_engine?.status === 'online'
+                  ? 'bg-accent-emerald'
+                  : status?.go_engine?.status === 'offline'
+                  ? 'bg-accent-rose'
+                  : 'bg-slate-500'
+              }`}
+            ></span>
             <span className="text-slate-300">GO ENGINE:</span>
-            <span className="text-accent-emerald font-bold">{status?.go_engine?.status || 'ONLINE'}</span>
+            <span
+              className={`font-bold ${
+                status?.go_engine?.status === 'online'
+                  ? 'text-accent-emerald'
+                  : status?.go_engine?.status === 'offline'
+                  ? 'text-accent-rose'
+                  : 'text-slate-400'
+              }`}
+            >
+              {status?.go_engine?.status === 'online'
+                ? 'ONLINE'
+                : status?.go_engine?.status === 'offline'
+                ? 'OFFLINE'
+                : 'UNKNOWN'}
+            </span>
           </div>
 
 

@@ -441,19 +441,25 @@ export interface MemoryNote {
   active?: boolean;
 }
 
+export interface BrokerVenueHealth {
+  name: string;
+  broker?: string;
+  environment?: string;
+  configured?: boolean;
+  ready?: boolean;
+  connected?: boolean;
+  message?: string;
+  last_checked_at?: string;
+}
+
 export interface BrokerHealthSummary {
   active_broker: string;
   environment: string;
+  configured?: boolean;
   ready: boolean;
   connected: boolean;
   message: string;
-  all_registered_brokers: Array<{
-    name: string;
-    environment: string;
-    ready: boolean;
-    connected: boolean;
-    message: string;
-  }>;
+  all_registered_brokers: BrokerVenueHealth[];
 }
 
 export interface ReconciliationDiscrepancy {
@@ -492,6 +498,15 @@ export interface InstitutionalRiskMetrics {
 }
 
 export type TradingReadiness = 'READY' | 'NOT_READY' | 'FROZEN' | 'UNKNOWN';
+
+export type ReconciliationState =
+  | 'NOT_RUN'
+  | 'RUNNING'
+  | 'HEALTHY'
+  | 'MISMATCH'
+  | 'FAILED'
+  | 'STALE'
+  | 'UNKNOWN';
 
 export interface ReconciliationSummary {
   status: 'UNKNOWN' | 'CLEAN' | 'MISMATCH' | 'FAILED' | 'STALE' | 'WARNING';

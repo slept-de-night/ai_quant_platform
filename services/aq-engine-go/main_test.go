@@ -354,7 +354,15 @@ func TestHTTPGatedUnfreezePreconditions(t *testing.T) {
 
 	// 2d. Record reconciliation with critical discrepancies -> must be rejected
 	reconciler.RecordRun("paper-sim", reconciliation.Diff{
-		TotalCount:  2,
+		Discrepancies: []reconciliation.Discrepancy{
+			{
+				Type:     reconciliation.DiscrepancyUnknownBrokerOrder,
+				Severity: reconciliation.SeverityCritical,
+				Symbol:   "SPY",
+				Message:  "Unknown order detected",
+			},
+		},
+		TotalCount:  1,
 		HasCritical: true,
 		GeneratedAt: time.Now().UTC(),
 	})

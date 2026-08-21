@@ -144,6 +144,9 @@ func (r *Reconciler) GetSummary(now time.Time) (status string, isFresh bool, las
 			critCount++
 		}
 	}
+	if critCount == 0 && r.LastDiff.HasCritical {
+		critCount = 1
+	}
 
 	age := now.Sub(*r.LastRunAt)
 	if r.MaxAge > 0 && age > r.MaxAge {

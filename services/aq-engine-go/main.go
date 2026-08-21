@@ -524,7 +524,10 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			blockingReasons = append(blockingReasons, "reconciliation_never_run")
 		} else if !isFresh {
 			blockingReasons = append(blockingReasons, "reconciliation_evidence_stale")
-		} else if critCount > 0 {
+		} else if reconStatus == "MISMATCH" || critCount > 0 {
+			if critCount == 0 {
+				critCount = 1
+			}
 			blockingReasons = append(blockingReasons, fmt.Sprintf("critical_discrepancies_present_%d", critCount))
 		} else if activeB != nil && reconBroker != activeB.Name() {
 			blockingReasons = append(blockingReasons, fmt.Sprintf("reconciliation_broker_mismatch_last_%s_active_%s", reconBroker, activeB.Name()))

@@ -418,7 +418,7 @@ export interface ResearchDossier {
 }
 
 export interface MemoryNote {
-  id: string;
+  id: number | string;
   agent: string;
   kind: string;
   content: string;
@@ -426,8 +426,52 @@ export interface MemoryNote {
   confidence: number;
   importance: number;
   created_at: string;
+  as_of_date?: string;
+  point_in_time?: string;
+  decision_id?: string;
+  claim_direction?: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'RISK_ALERT';
+  entities?: {
+    symbols?: string[];
+    sectors?: string[];
+    macro_factors?: string[];
+  };
   expires_at?: string;
-  active: boolean;
+  status?: string;
+  active?: boolean;
+}
+
+export interface BrokerHealthSummary {
+  active_broker: string;
+  environment: string;
+  ready: boolean;
+  connected: boolean;
+  message: string;
+  all_registered_brokers: Array<{
+    name: string;
+    environment: string;
+    ready: boolean;
+    connected: boolean;
+    message: string;
+  }>;
+}
+
+export interface ReconciliationDiscrepancy {
+  type: string;
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  symbol: string;
+  field: string;
+  local_value: string;
+  broker_value: string;
+  delta: number;
+  message: string;
+}
+
+export interface ReconciliationReport {
+  timestamp: string;
+  has_critical: boolean;
+  total_count: number;
+  critical_count: number;
+  discrepancies: ReconciliationDiscrepancy[];
 }
 
 export interface InstitutionalRiskMetrics {

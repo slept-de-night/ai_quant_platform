@@ -134,5 +134,15 @@ class GoEngineClient:
             logger.debug(f"Go engine select_broker failed: {e}")
         return None
 
+    def get_broker_health(self) -> Optional[Dict[str, Any]]:
+        """Get broker health summary from Go engine."""
+        try:
+            r = self.session.get(f"{self.base_url}/api/v1/brokers/health", timeout=self.timeout)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            logger.debug(f"Go engine get_broker_health failed: {e}")
+        return None
+
 
 

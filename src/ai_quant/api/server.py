@@ -1074,6 +1074,25 @@ def select_execution_broker(payload: Dict[str, str]):
     return {"status": "selected", "active": name, "mode": "fallback"}
 
 
+@app.get("/api/brokers/health")
+def get_broker_health():
+    """Get active broker health and registration diagnostics."""
+    res = go_client.get_broker_health()
+    if res is not None:
+        return res
+    return {
+        "active_broker": "paper-simulation",
+        "environment": "simulation",
+        "ready": True,
+        "connected": True,
+        "message": "Paper Simulation Adapter Active",
+        "all_registered_brokers": [
+            {"name": "paper-simulation", "environment": "simulation", "ready": True, "connected": True, "message": "Ready"},
+            {"name": "alpaca-paper", "environment": "paper", "ready": bool(settings.alpaca_api_key), "connected": False, "message": "Offline"},
+        ],
+    }
+
+
 
 
 

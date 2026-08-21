@@ -10,7 +10,8 @@ import {
   RouteRecommendation,
   ResearchDossier,
   MemoryNote,
-  InstitutionalRiskMetrics
+  InstitutionalRiskMetrics,
+  BrokerHealthSummary,
 } from '../types';
 
 const API_BASE = '/api';
@@ -339,6 +340,18 @@ export const api = {
       body: JSON.stringify({ name }),
     });
     if (!res.ok) throw new Error(`Select broker error: ${res.statusText}`);
+    return res.json();
+  },
+
+  getBrokerHealth: async (): Promise<BrokerHealthSummary> => {
+    const res = await fetch(`${API_BASE}/brokers/health`);
+    if (!res.ok) throw new Error(`Broker health error: ${res.statusText}`);
+    return res.json();
+  },
+
+  getMetrics: async () => {
+    const res = await fetch(`${API_BASE}/v1/metrics`);
+    if (!res.ok) throw new Error(`Metrics error: ${res.statusText}`);
     return res.json();
   },
 };

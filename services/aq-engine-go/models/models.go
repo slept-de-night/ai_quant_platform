@@ -13,12 +13,15 @@ const (
 type OrderStatus string
 
 const (
-	OrderStatusPending   OrderStatus = "PENDING"
-	OrderStatusApproved  OrderStatus = "APPROVED"
-	OrderStatusRejected  OrderStatus = "REJECTED"
-	OrderStatusSubmitted OrderStatus = "SUBMITTED"
-	OrderStatusFilled    OrderStatus = "FILLED"
-	OrderStatusCancelled OrderStatus = "CANCELLED"
+	OrderStatusPending      OrderStatus = "PENDING"
+	OrderStatusApproved     OrderStatus = "APPROVED"
+	OrderStatusRejected     OrderStatus = "REJECTED"
+	OrderStatusSubmitting   OrderStatus = "SUBMITTING"
+	OrderStatusSubmitted    OrderStatus = "SUBMITTED"
+	OrderStatusAcknowledged OrderStatus = "ACKNOWLEDGED"
+	OrderStatusFilled       OrderStatus = "FILLED"
+	OrderStatusCancelled    OrderStatus = "CANCELLED"
+	OrderStatusSubmitFailed OrderStatus = "SUBMIT_FAILED"
 )
 
 type OrderIntent struct {

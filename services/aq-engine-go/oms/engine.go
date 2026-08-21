@@ -1,11 +1,13 @@
 package oms
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sync"
 	"time"
 
+	"aq-engine-go/broker"
 	"aq-engine-go/models"
 )
 
@@ -80,16 +82,30 @@ func (e *Engine) GetOrderHistory() []models.OrderIntent {
 	return out
 }
 
-func (e *Engine) UpdateOrderStatus(clientOrderID string, status models.OrderStatus) {
+func (e *Engine) GetOrderByClientID(clientOrderID string) (models.OrderIntent, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	ord, exists := e.orderHistory[clientOrderID]
+	return ord, exists
+}
+
+func (e *Engine) UpdateOrderStatus(clientOrderID string, status models.OrderStatus, reasons ...string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if ord, exists := e.orderHistory[clientOrderID]; exists {
 		ord.Status = status
+		if len(reasons) > 0 && reasons[0] != "" {
+			ord.Reason = reasons[0]
+		}
 		e.orderHistory[clientOrderID] = ord
 		for i := range e.orderList {
 			if e.orderList[i].ClientOrderID == clientOrderID {
 				e.orderList[i].Status = status
+				if len(reasons) > 0 && reasons[0] != "" {
+					e.orderList[i].Reason = reasons[0]
+				}
 				break
 			}
 		}
@@ -114,37 +130,23 @@ func (e *Engine) UpdatePortfolio(equity, cash, grossExposure float64) {
 	}
 }
 
-// EvaluateRisk performs deterministic sub-millisecond safety validation
-func (e *Engine) EvaluateRisk(order *models.OrderIntent) models.RiskDecision {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
+// evaluateRiskRules is an internal helper that evaluates limits without mutating state
+func (e *Engine) evaluateRiskRules(p models.PortfolioState, dailyOrders int, order *models.OrderIntent) []string {
 	var reasons []string
-	traceID := order.TraceID
 
 	// 1. Emergency Kill Switch / Freeze Check
 	if e.isFrozen {
-		order.Status = models.OrderStatusRejected
-		return models.RiskDecision{
-			Approved: false,
-			Order:    order,
-			Reasons:  []string{"Emergency Kill Switch Active: Firm-wide trading is currently FROZEN"},
-			TraceID:  traceID,
-		}
+		reasons = append(reasons, "Emergency Kill Switch Active: Firm-wide trading is currently FROZEN")
+		return reasons
 	}
 
-	// 2. Idempotency Check
-	if _, exists := e.orderHistory[order.ClientOrderID]; exists {
-		order.Status = models.OrderStatusRejected
-		return models.RiskDecision{
-			Approved: false,
-			Order:    order,
-			Reasons:  []string{fmt.Sprintf("Duplicate client_order_id blocked: %s", order.ClientOrderID)},
-			TraceID:  traceID,
+	// 2. Idempotency Check (if already present in history)
+	if order.ClientOrderID != "" {
+		if _, exists := e.orderHistory[order.ClientOrderID]; exists {
+			reasons = append(reasons, fmt.Sprintf("Duplicate client_order_id blocked: %s", order.ClientOrderID))
+			return reasons
 		}
 	}
-
-	p := e.portfolio
 
 	// 3. Daily Loss Limit Circuit Breaker
 	if p.DailyPnL < 0 && math.Abs(p.DailyPnL) > e.config.MaxDailyLossPct*p.Equity {
@@ -160,7 +162,7 @@ func (e *Engine) EvaluateRisk(order *models.OrderIntent) models.RiskDecision {
 	}
 
 	// 5. Daily Orders Count Limit
-	if e.dailyOrders >= e.config.MaxOrdersPerDay {
+	if dailyOrders >= e.config.MaxOrdersPerDay {
 		reasons = append(reasons, fmt.Sprintf("Maximum daily orders limit reached (%d)", e.config.MaxOrdersPerDay))
 	}
 
@@ -192,28 +194,104 @@ func (e *Engine) EvaluateRisk(order *models.OrderIntent) models.RiskDecision {
 		}
 	}
 
+	return reasons
+}
+
+// CheckRisk performs pure deterministic pre-trade risk evaluation without any side effects or mutations.
+// It does not insert an order, increment dailyOrders, reserve exposure, modify portfolio, or alter idempotency state.
+func (e *Engine) CheckRisk(order *models.OrderIntent) models.RiskDecision {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	reasons := e.evaluateRiskRules(e.portfolio, e.dailyOrders, order)
+	traceID := order.TraceID
+
+	ordCopy := *order
 	if len(reasons) > 0 {
-		order.Status = models.OrderStatusRejected
+		ordCopy.Status = models.OrderStatusRejected
 		return models.RiskDecision{
 			Approved: false,
-			Order:    order,
+			Order:    &ordCopy,
 			Reasons:  reasons,
 			TraceID:  traceID,
 		}
 	}
 
-	// Reserve and record order atomically
-	order.CreatedAt = time.Now().UTC()
-	order.Status = models.OrderStatusApproved
-	e.orderHistory[order.ClientOrderID] = *order
-	e.orderList = append(e.orderList, *order)
-	e.dailyOrders++
-
+	ordCopy.Status = models.OrderStatusApproved
 	return models.RiskDecision{
 		Approved: true,
-		Order:    order,
+		Order:    &ordCopy,
 		Reasons:  nil,
 		TraceID:  traceID,
 	}
 }
 
+// EvaluateRisk is an alias for CheckRisk to preserve backward compatibility.
+func (e *Engine) EvaluateRisk(order *models.OrderIntent) models.RiskDecision {
+	return e.CheckRisk(order)
+}
+
+// ReserveOrder atomically validates risk and idempotency, registers the order in history as SUBMITTING,
+// and increments the daily orders counter.
+func (e *Engine) ReserveOrder(order *models.OrderIntent) (*models.OrderIntent, models.RiskDecision) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	today := time.Now().UTC().Format("2006-01-02")
+	if today != e.lastResetDay {
+		e.lastResetDay = today
+		e.dailyOrders = 0
+	}
+
+	reasons := e.evaluateRiskRules(e.portfolio, e.dailyOrders, order)
+	traceID := order.TraceID
+
+	ordCopy := *order
+	if len(reasons) > 0 {
+		ordCopy.Status = models.OrderStatusRejected
+		return nil, models.RiskDecision{
+			Approved: false,
+			Order:    &ordCopy,
+			Reasons:  reasons,
+			TraceID:  traceID,
+		}
+	}
+
+	if ordCopy.CreatedAt.IsZero() {
+		ordCopy.CreatedAt = time.Now().UTC()
+	}
+	ordCopy.Status = models.OrderStatusSubmitting
+
+	e.orderHistory[ordCopy.ClientOrderID] = ordCopy
+	e.orderList = append(e.orderList, ordCopy)
+	e.dailyOrders++
+
+	return &ordCopy, models.RiskDecision{
+		Approved: true,
+		Order:    &ordCopy,
+		Reasons:  nil,
+		TraceID:  traceID,
+	}
+}
+
+// Submit performs the full order submission state machine:
+// CheckRisk/ReserveOrder -> SUBMITTING -> broker SubmitOrder -> ACKNOWLEDGED or SUBMIT_FAILED.
+func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*broker.BrokerOrder, models.RiskDecision, error) {
+	if b == nil {
+		return nil, models.RiskDecision{Approved: false, Reasons: []string{"broker adapter is nil"}}, errors.New("broker adapter is nil")
+	}
+
+	reserved, decision := e.ReserveOrder(order)
+	if !decision.Approved {
+		return nil, decision, fmt.Errorf("risk rejection: %v", decision.Reasons)
+	}
+
+	resp, err := b.SubmitOrder(reserved)
+	if err != nil {
+		e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, err.Error())
+		return nil, decision, err
+	}
+
+	e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusAcknowledged)
+	return resp, decision, nil
+}

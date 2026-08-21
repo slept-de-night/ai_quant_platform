@@ -58,6 +58,15 @@ func main() {
 	gateway.PublishTick(models.MarketTick{Symbol: "NVDA", Price: 128.50, Volume: 12000000, Timestamp: time.Now().UTC()})
 	gateway.PublishTick(models.MarketTick{Symbol: "QQQ", Price: 445.20, Volume: 3200000, Timestamp: time.Now().UTC()})
 
+	mux := setupRouter(engine, brokerReg, gateway)
+
+	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
+}
+
+func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market.Gateway) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 1. Health & Diagnostics
@@ -92,7 +101,7 @@ func main() {
 		json.NewEncoder(w).Encode(engine.GetPortfolio(symbol))
 	})
 
-	// 3. Sub-millisecond Risk Check
+	// 3. Sub-millisecond Pure Risk Check
 	mux.HandleFunc("POST /api/v1/risk/check", func(w http.ResponseWriter, r *http.Request) {
 		var order models.OrderIntent
 		if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
@@ -100,27 +109,16 @@ func main() {
 			return
 		}
 
-		decision := engine.EvaluateRisk(&order)
+		decision := engine.CheckRisk(&order)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(decision)
 	})
 
-	// 4. Order Execution (Risk Check + Pluggable Broker Submit)
+	// 4. Order Execution (Risk Check + Atomically Reserve SUBMITTING + Pluggable Broker Submit)
 	mux.HandleFunc("POST /api/v1/orders/submit", func(w http.ResponseWriter, r *http.Request) {
 		var order models.OrderIntent
 		if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
 			http.Error(w, fmt.Sprintf("invalid request payload: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		// Fast deterministic in-memory risk check
-		decision := engine.EvaluateRisk(&order)
-		if !decision.Approved {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"submitted": false,
-				"decision":  decision,
-			})
 			return
 		}
 
@@ -131,13 +129,22 @@ func main() {
 			return
 		}
 
-		resp, err := activeBroker.SubmitOrder(&order)
+		resp, decision, err := engine.Submit(&order, activeBroker)
 		if err != nil {
+			if !decision.Approved {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"submitted": false,
+					"decision":  decision,
+				})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"submitted": false,
 				"error":     err.Error(),
+				"decision":  decision,
 			})
 			return
 		}
@@ -301,10 +308,7 @@ func main() {
 		})
 	})
 
-	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatalf("Server failed: %v", err)
-	}
+	return mux
 }
 
 

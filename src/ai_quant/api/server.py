@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -992,30 +993,86 @@ def get_risk_metrics(symbol: str = "SPY", days: int = 252):
         raise HTTPException(status_code=500, detail=f"Failed to calculate risk metrics: {e}")
 
 
-@app.post("/api/risk/kill")
+class KillRequest(BaseModel):
+    reason: Optional[str] = "Emergency Kill Switch ENGAGED by operator"
+    requested_by: Optional[str] = "operator"
 
-def emergency_kill_switch():
+
+class UnfreezeRequest(BaseModel):
+    reason: str = "manual unfreeze"
+    requested_by: Optional[str] = "operator"
+    reconciliation_run_id: Optional[str] = ""
+    override: Optional[bool] = False
+
+
+@app.get("/api/readiness")
+def get_system_readiness():
+    """Retrieve truthful, full-stack trading readiness status."""
+    res = go_client.get_readiness()
+    if res is not None:
+        return res
+    return {
+        "process": "offline",
+        "trading_ready": False,
+        "trading_readiness": "UNKNOWN",
+        "execution_mode": "SIMULATION",
+        "active_broker": "none",
+        "broker_configured": False,
+        "broker_connected": False,
+        "broker_ready": False,
+        "journal_ready": False,
+        "reconciliation": {
+            "status": "UNKNOWN",
+            "critical_count": 0,
+            "total_count": 0,
+            "is_fresh": False,
+            "max_age_seconds": 300,
+        },
+        "is_frozen": True,
+        "freeze_reason": "Go Execution Engine Disconnected",
+        "market_data": {
+            "status": "UNAVAILABLE",
+            "tick_count": 0,
+        },
+        "blocking_reasons": ["go_engine_disconnected"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/risk/kill")
+def emergency_kill_switch(req: Optional[KillRequest] = None):
     """Engage firm-wide emergency kill switch to freeze all order execution."""
-    res = go_client.freeze()
+    reason = req.reason if req and req.reason else "Emergency Kill Switch ENGAGED by operator"
+    by = req.requested_by if req and req.requested_by else "operator"
+    res = go_client.freeze(reason=reason, requested_by=by)
     if res is not None:
         return res
     return {
         "status": "frozen",
         "is_frozen": True,
+        "reason": reason,
         "message": "Emergency Kill Switch ENGAGED in Python fallback mode",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.post("/api/risk/unfreeze")
-def disengage_kill_switch():
+def disengage_kill_switch(req: Optional[UnfreezeRequest] = None):
     """Disengage emergency kill switch and resume normal execution."""
-    res = go_client.unfreeze()
+    reason = req.reason if req and req.reason else "manual unfreeze"
+    by = req.requested_by if req and req.requested_by else "operator"
+    run_id = req.reconciliation_run_id if req and req.reconciliation_run_id else ""
+    override = req.override if req and req.override else False
+
+    res = go_client.unfreeze(reason=reason, requested_by=by, reconciliation_run_id=run_id, override=override)
     if res is not None:
+        if not res.get("resumed", True) and not override:
+            raise HTTPException(status_code=409, detail=res)
         return res
     return {
         "status": "active",
         "is_frozen": False,
+        "reason": reason,
         "message": "Execution RESUMED in Python fallback mode",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

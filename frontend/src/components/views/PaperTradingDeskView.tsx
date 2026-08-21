@@ -101,9 +101,9 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
     setIsTogglingKill(true);
     try {
       if (cycleData?.portfolio?.is_frozen) {
-        await api.disengageKillSwitch();
+        await api.disengageKillSwitch('Operator trading desk unfreeze', 'operator');
       } else {
-        await api.engageKillSwitch();
+        await api.engageKillSwitch('Operator trading desk emergency kill', 'operator');
       }
       await fetchCycle();
     } catch (err: any) {

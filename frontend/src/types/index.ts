@@ -490,3 +490,42 @@ export interface InstitutionalRiskMetrics {
   calmar_ratio: number;
   beta: number;
 }
+
+export type TradingReadiness = 'READY' | 'NOT_READY' | 'FROZEN' | 'UNKNOWN';
+
+export interface ReconciliationSummary {
+  status: 'UNKNOWN' | 'CLEAN' | 'MISMATCH' | 'FAILED' | 'STALE' | 'WARNING';
+  last_run_at?: string;
+  critical_count: number;
+  total_count: number;
+  is_fresh: boolean;
+  max_age_seconds: number;
+  broker_name?: string;
+}
+
+export interface MarketDataSummary {
+  status: 'LIVE' | 'DEMO' | 'UNAVAILABLE' | 'STALE';
+  updated_at?: string;
+  tick_count: number;
+}
+
+export interface ReadinessReport {
+  process: string;
+  trading_ready: boolean;
+  trading_readiness: TradingReadiness;
+  execution_mode: string;
+  active_broker: string;
+  broker_configured: boolean;
+  broker_connected: boolean;
+  broker_ready: boolean;
+  journal_ready: boolean;
+  reconciliation: ReconciliationSummary;
+  is_frozen: boolean;
+  freeze_reason?: string;
+  frozen_at?: string;
+  frozen_by?: string;
+  market_data: MarketDataSummary;
+  blocking_reasons: string[];
+  timestamp: string;
+}
+

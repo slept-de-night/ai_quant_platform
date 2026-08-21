@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { PlatformStatus, StrategyItem, InstitutionalRiskMetrics } from '../../types';
+import { PlatformStatus, StrategyItem, InstitutionalRiskMetrics, ReadinessReport } from '../../types';
 import { api } from '../../services/api';
 import {
   ShieldCheck,
@@ -15,6 +15,7 @@ import {
 
 interface DashboardViewProps {
   status: PlatformStatus | null;
+  readiness?: ReadinessReport | null;
   strategies: StrategyItem[];
   selectedSymbol: string;
   onNavigateTab: (tab: any) => void;
@@ -22,6 +23,7 @@ interface DashboardViewProps {
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   status,
+  readiness,
   strategies,
   selectedSymbol,
   onNavigateTab,
@@ -45,6 +47,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [selectedSymbol]);
 
   const validatedCount = strategies.filter((s) => s.status === 'VALIDATED' || s.status === 'APPROVED').length;
+  const tradingReadiness = readiness?.trading_readiness || (status?.go_engine?.status === 'healthy' ? 'READY' : 'UNKNOWN');
+  const isFrozen = readiness?.is_frozen ?? status?.go_engine?.is_frozen ?? false;
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-background">
@@ -154,33 +158,45 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="p-4 rounded-xl bg-card border border-card-border">
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span>OMS / EMS Execution Core</span>
-            <Cpu className="w-4 h-4 text-accent-amber" />
+            <Cpu className="w-4 h-4 text-accent-cyan" />
           </div>
           <div className="mt-2 flex items-center gap-2">
-            {status?.go_engine?.status === 'healthy' ? (
+            {tradingReadiness === 'READY' && !isFrozen ? (
               <>
                 <span className="relative flex h-3 w-3">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent-emerald opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-3 w-3 bg-accent-emerald"></span>
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-400"></span>
                 </span>
-                <span className="text-xl font-bold font-mono text-slate-100">
-                  Go Engine Online
+                <span className="text-lg font-bold font-mono text-emerald-400">
+                  Execution Ready
+                </span>
+              </>
+            ) : isFrozen ? (
+              <>
+                <span className="h-3 w-3 rounded-full bg-rose-500 animate-pulse"></span>
+                <span className="text-lg font-bold font-mono text-rose-400">
+                  OMS Frozen
+                </span>
+              </>
+            ) : tradingReadiness === 'NOT_READY' ? (
+              <>
+                <span className="h-3 w-3 rounded-full bg-amber-400"></span>
+                <span className="text-lg font-bold font-mono text-amber-400">
+                  Not Ready
                 </span>
               </>
             ) : (
               <>
                 <span className="h-3 w-3 rounded-full bg-slate-600"></span>
-                <span className="text-xl font-bold font-mono text-slate-400">
-                  {status?.go_engine?.status ? status.go_engine.status.toUpperCase() : 'UNKNOWN'}
+                <span className="text-lg font-bold font-mono text-slate-400">
+                  Disconnected
                 </span>
               </>
             )}
           </div>
           <div className="mt-1 text-[11px] text-slate-400 font-mono">
-            Mode: {status?.go_engine?.execution_mode || 'PAPER'} | Uptime:{' '}
-            {typeof status?.go_engine?.uptime_seconds === 'number'
-              ? `${Math.floor(status.go_engine.uptime_seconds)}s`
-              : '—'}
+            Broker: {readiness?.active_broker || (status?.go_engine as any)?.active_broker || 'None'} | Mode:{' '}
+            {readiness?.execution_mode || status?.go_engine?.execution_mode || 'SIMULATION'}
           </div>
         </div>
       </div>

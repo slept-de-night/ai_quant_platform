@@ -107,3 +107,29 @@ def test_chat_endpoint():
     assert "model" in data
 
 
+def test_readiness_endpoint():
+    response = client.get("/api/readiness")
+    assert response.status_code in (200, 503)
+    data = response.json()
+    assert "trading_readiness" in data
+    assert "reconciliation" in data
+    assert "market_data" in data
+    assert "blocking_reasons" in data
+
+
+def test_kill_and_unfreeze_endpoints():
+    # Test engage kill switch
+    response = client.post("/api/risk/kill", json={"reason": "test freeze", "requested_by": "tester"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("is_frozen") is True
+
+    # Test unfreeze
+    unfreeze_res = client.post(
+        "/api/risk/unfreeze",
+        json={"reason": "test unfreeze", "requested_by": "tester", "override": True},
+    )
+    assert unfreeze_res.status_code in (200, 409)
+
+
+

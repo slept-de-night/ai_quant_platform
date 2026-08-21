@@ -74,21 +74,38 @@ class GoEngineClient:
             logger.debug(f"Go engine get_market_tick failed: {e}")
         return None
 
-    def freeze(self) -> Optional[Dict[str, Any]]:
-        """Engage firm-wide emergency kill switch."""
+    def get_readiness(self) -> Optional[Dict[str, Any]]:
+        """Query detailed operational readiness and execution safety report."""
         try:
-            r = self.session.post(f"{self.base_url}/api/v1/risk/kill", timeout=self.timeout)
+            r = self.session.get(f"{self.base_url}/api/v1/readiness", timeout=self.timeout)
+            if r.status_code in (200, 503):
+                return r.json()
+        except Exception as e:
+            logger.debug(f"Go engine get_readiness failed: {e}")
+        return None
+
+    def freeze(self, reason: str = "Emergency Kill Switch ENGAGED by operator", requested_by: str = "operator") -> Optional[Dict[str, Any]]:
+        """Engage firm-wide emergency kill switch with audit metadata."""
+        try:
+            payload = {"reason": reason, "requested_by": requested_by}
+            r = self.session.post(f"{self.base_url}/api/v1/risk/kill", json=payload, timeout=self.timeout)
             if r.status_code == 200:
                 return r.json()
         except Exception as e:
             logger.debug(f"Go engine freeze failed: {e}")
         return None
 
-    def unfreeze(self) -> Optional[Dict[str, Any]]:
-        """Disengage emergency kill switch and resume trading."""
+    def unfreeze(self, reason: str = "manual unfreeze", requested_by: str = "operator", reconciliation_run_id: str = "", override: bool = False) -> Optional[Dict[str, Any]]:
+        """Disengage emergency kill switch with audit justification and safety validation."""
         try:
-            r = self.session.post(f"{self.base_url}/api/v1/risk/unfreeze", timeout=self.timeout)
-            if r.status_code == 200:
+            payload = {
+                "reason": reason,
+                "requested_by": requested_by,
+                "reconciliation_run_id": reconciliation_run_id,
+                "override": override,
+            }
+            r = self.session.post(f"{self.base_url}/api/v1/risk/unfreeze", json=payload, timeout=self.timeout)
+            if r.status_code in (200, 409):
                 return r.json()
         except Exception as e:
             logger.debug(f"Go engine unfreeze failed: {e}")

@@ -12,6 +12,7 @@ import {
   MemoryNote,
   InstitutionalRiskMetrics,
   BrokerHealthSummary,
+  ReadinessReport,
 } from '../types';
 
 const API_BASE = '/api';
@@ -302,17 +303,37 @@ export const api = {
     return res.json();
   },
 
+  // Full Operational Readiness Report
+  getReadiness: async (): Promise<ReadinessReport> => {
+    const res = await fetch(`${API_BASE}/readiness`);
+    if (!res.ok && res.status !== 503) throw new Error(`Readiness error: ${res.statusText}`);
+    return res.json();
+  },
+
   // Firm-Wide Emergency Kill Switch & Order History
-  engageKillSwitch: async () => {
-    const res = await fetch(`${API_BASE}/risk/kill`, { method: 'POST' });
+  engageKillSwitch: async (reason?: string, requested_by?: string) => {
+    const res = await fetch(`${API_BASE}/risk/kill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, requested_by }),
+    });
     if (!res.ok) throw new Error(`Kill switch error: ${res.statusText}`);
     return res.json();
   },
 
-  disengageKillSwitch: async () => {
-    const res = await fetch(`${API_BASE}/risk/unfreeze`, { method: 'POST' });
-    if (!res.ok) throw new Error(`Unfreeze error: ${res.statusText}`);
-    return res.json();
+  disengageKillSwitch: async (reason: string, requested_by?: string, reconciliation_run_id?: string, override?: boolean) => {
+    const res = await fetch(`${API_BASE}/risk/unfreeze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, requested_by, reconciliation_run_id, override }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.message || data.detail?.message || `Unfreeze error: ${res.statusText}`);
+      (err as any).data = data;
+      throw err;
+    }
+    return data;
   },
 
   getOrderHistory: async () => {

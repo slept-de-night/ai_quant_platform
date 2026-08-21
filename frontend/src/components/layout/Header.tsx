@@ -244,30 +244,34 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Emergency Kill Switch / Freeze State */}
-          <button
-            onClick={async () => {
-              try {
-                if (status?.go_engine?.is_frozen) {
-                  await api.disengageKillSwitch('Operator header toggle unfreeze', 'operator');
-                } else {
+          {status?.go_engine?.is_frozen ? (
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-xs font-bold border bg-accent-rose/20 text-accent-rose border-accent-rose/40"
+              title="Execution is frozen. Resume is gated behind safety checks in the Safety Status bar / Trading Desk (Run Reconciliation, then resume with a reason)."
+            >
+              <ShieldAlert className="w-3.5 h-3.5 text-accent-rose" />
+              <span className="hidden sm:inline">KILL SWITCH:</span>
+              <span>FROZEN</span>
+            </div>
+          ) : (
+            <button
+              onClick={async () => {
+                if (!window.confirm('ENGAGE emergency kill switch? All new order submissions will be blocked.')) return;
+                try {
                   await api.engageKillSwitch('Operator header emergency kill', 'operator');
+                  onRefresh();
+                } catch (e) {
+                  console.error('Kill switch engage failed:', e);
                 }
-                onRefresh();
-              } catch (e) {
-                console.error('Kill switch toggle failed:', e);
-              }
-            }}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-xs font-bold transition cursor-pointer border ${
-              status?.go_engine?.is_frozen
-                ? 'bg-accent-rose/20 text-accent-rose border-accent-rose/40 animate-pulse hover:bg-accent-rose/30'
-                : 'bg-accent-emerald/10 text-accent-emerald border-accent-emerald/30 hover:bg-accent-rose/10 hover:text-accent-rose hover:border-accent-rose/30'
-            }`}
-            title={status?.go_engine?.is_frozen ? 'Click to RESUME execution' : 'Click to ENGAGE Emergency Kill Switch'}
-          >
-            <ShieldAlert className={`w-3.5 h-3.5 ${status?.go_engine?.is_frozen ? 'text-accent-rose animate-bounce' : 'text-accent-emerald'}`} />
-            <span className="hidden sm:inline">KILL SWITCH:</span>
-            <span>{status?.go_engine?.is_frozen ? 'FROZEN' : 'ACTIVE'}</span>
-          </button>
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-xs font-bold transition cursor-pointer border bg-accent-emerald/10 text-accent-emerald border-accent-emerald/30 hover:bg-accent-rose/10 hover:text-accent-rose hover:border-accent-rose/30"
+              title="ENGAGE Emergency Kill Switch (freezes all order execution)"
+            >
+              <ShieldAlert className="w-3.5 h-3.5 text-accent-emerald" />
+              <span className="hidden sm:inline">KILL SWITCH:</span>
+              <span>ACTIVE</span>
+            </button>
+          )}
 
           {/* Engine Status */}
           <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded bg-background border border-card-border font-mono text-xs">

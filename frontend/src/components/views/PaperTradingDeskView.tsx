@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { StrategyItem, BrokerHealthSummary, ReconciliationReport, ReadinessReport, ReconciliationState } from '../../types';
 import { api } from '../../services/api';
+import { UnfreezeModal } from '../layout/UnfreezeModal';
 import {
   ShieldCheck,
   Play,
@@ -154,20 +155,20 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
   };
 
   const handleToggleKillSwitch = async () => {
+    // Engage-only: disengaging is a deliberate safety-gated action handled by
+    // the UnfreezeModal, never a casual toggle.
     setIsTogglingKill(true);
     try {
-      if (cycleData?.portfolio?.is_frozen) {
-        await api.disengageKillSwitch('Operator trading desk unfreeze', 'operator');
-      } else {
-        await api.engageKillSwitch('Operator trading desk emergency kill', 'operator');
-      }
+      await api.engageKillSwitch('Operator trading desk emergency kill', 'operator');
       await fetchCycle();
     } catch (err: any) {
-      setError(err.message || 'Failed to toggle kill switch');
+      setError(err.message || 'Failed to engage kill switch');
     } finally {
       setIsTogglingKill(false);
     }
   };
+
+  const [isUnfreezeOpen, setIsUnfreezeOpen] = useState(false);
 
   const isFrozen = cycleData?.portfolio?.is_frozen || readiness?.is_frozen || false;
 
@@ -228,23 +229,54 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
 
       {/* Freeze / Kill Switch Emergency Alert Banner */}
       {isFrozen && (
-        <div className="p-4 rounded-xl bg-accent-rose/15 border border-accent-rose/40 flex items-center justify-between gap-4 text-xs font-mono text-accent-rose">
+        <div className="p-4 rounded-xl bg-accent-rose/15 border border-accent-rose/40 text-xs font-mono text-accent-rose space-y-3">
           <div className="flex items-center gap-3">
             <AlertTriangle className="w-5 h-5 flex-shrink-0" />
             <div>
-              <div className="font-bold">ENGINE FROZEN IN RECONCILIATION / KILL-SWITCH SAFETY STATE</div>
+              <div className="font-bold">TRADING FROZEN</div>
               <div className="text-[11px] text-slate-300 mt-0.5">
                 All automated order submissions are blocked. Read-only risk checks and reconciliations remain available.
               </div>
             </div>
           </div>
-          <button
-            onClick={handleToggleKillSwitch}
-            disabled={isTogglingKill}
-            className="px-4 py-2 bg-accent-rose hover:bg-rose-600 text-white font-bold rounded text-xs transition cursor-pointer flex-shrink-0"
-          >
-            {isTogglingKill ? 'Processing...' : 'Manual Unfreeze'}
-          </button>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+            <div className="flex justify-between text-slate-400">
+              <span>Reason:</span>
+              <span className="text-slate-200 text-right">{readiness?.freeze_reason || cycleData?.portfolio?.freeze_reason || 'Emergency freeze engaged'}</span>
+            </div>
+            <div className="flex justify-between text-slate-400">
+              <span>Reconciliation:</span>
+              <span className={`font-semibold ${reconState === 'HEALTHY' ? 'text-accent-emerald' : reconState === 'MISMATCH' || reconState === 'FAILED' ? 'text-accent-rose' : 'text-slate-200'}`}>
+                {reconState}
+              </span>
+            </div>
+            <div className="flex justify-between text-slate-400">
+              <span>Last reconciliation:</span>
+              <span className="text-slate-200">{readiness?.reconciliation?.last_run_at ? new Date(readiness.reconciliation.last_run_at).toLocaleTimeString() : 'Never'}</span>
+            </div>
+            <div className="flex justify-between text-slate-400">
+              <span>Critical discrepancies:</span>
+              <span className="text-slate-200">{readiness?.reconciliation?.critical_count ?? 0}</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              onClick={handleRunReconciliation}
+              disabled={isReconciling}
+              className="px-3 py-1.5 bg-accent-amber/20 hover:bg-accent-amber/30 text-accent-amber border border-accent-amber/40 rounded text-[11px] font-bold transition cursor-pointer flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isReconciling ? 'animate-spin' : ''}`} />
+              {isReconciling ? 'Reconciling...' : 'Run Reconciliation'}
+            </button>
+            <button
+              onClick={() => setIsUnfreezeOpen(true)}
+              className="px-3 py-1.5 bg-accent-rose hover:bg-rose-600 text-white border border-accent-rose/50 rounded text-[11px] font-bold transition cursor-pointer"
+            >
+              Review Differences & Resume...
+            </button>
+          </div>
         </div>
       )}
 
@@ -409,7 +441,7 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
           </div>
 
           <button
-            onClick={handleToggleKillSwitch}
+            onClick={isFrozen ? () => setIsUnfreezeOpen(true) : handleToggleKillSwitch}
             disabled={isTogglingKill}
             className={`w-full py-2.5 rounded font-bold transition cursor-pointer shadow-md ${
               isFrozen
@@ -417,7 +449,7 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
                 : 'bg-accent-rose hover:bg-rose-600 text-white'
             }`}
           >
-            {isTogglingKill ? 'Processing...' : isFrozen ? 'Disengage Kill Switch' : 'Engage Firm Kill Switch'}
+            {isFrozen ? 'Resume Trading...' : 'Engage Firm Kill Switch'}
           </button>
         </div>
       </div>
@@ -507,6 +539,13 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
           </div>
         </div>
       </div>
+
+      <UnfreezeModal
+        isOpen={isUnfreezeOpen}
+        onClose={() => setIsUnfreezeOpen(false)}
+        readiness={readiness ?? null}
+        onSuccess={() => { setIsUnfreezeOpen(false); fetchCycle(); }}
+      />
     </div>
   );
 };

@@ -210,9 +210,9 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={async () => {
               try {
                 if (status?.go_engine?.is_frozen) {
-                  await api.disengageKillSwitch();
+                  await api.disengageKillSwitch('Operator header toggle unfreeze', 'operator');
                 } else {
-                  await api.engageKillSwitch();
+                  await api.engageKillSwitch('Operator header emergency kill', 'operator');
                 }
                 onRefresh();
               } catch (e) {

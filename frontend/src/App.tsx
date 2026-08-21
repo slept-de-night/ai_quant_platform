@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { PlatformStatus, WatchlistAsset, StrategyItem } from './types';
+import { PlatformStatus, WatchlistAsset, StrategyItem, ReadinessReport } from './types';
 import { api } from './services/api';
 import { Header } from './components/layout/Header';
+import { SafetyStatusBar } from './components/layout/SafetyStatusBar';
 import { Sidebar } from './components/layout/Sidebar';
 import { TabNavigation, TabKey } from './components/layout/TabNavigation';
 import { DashboardView } from './components/views/DashboardView';
@@ -20,6 +21,7 @@ export const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
 
   const [status, setStatus] = useState<PlatformStatus | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessReport | null>(null);
   const [watchlist, setWatchlist] = useState<WatchlistAsset[]>([]);
   const [strategies, setStrategies] = useState<StrategyItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -27,13 +29,15 @@ export const App: React.FC = () => {
   const loadInitialData = async () => {
     setIsLoading(true);
     try {
-      const [statusRes, watchlistRes, strategiesRes] = await Promise.all([
+      const [statusRes, readinessRes, watchlistRes, strategiesRes] = await Promise.all([
         api.getStatus().catch(() => null),
+        api.getReadiness().catch(() => null),
         api.getWatchlist().catch(() => ({ items: [] })),
         api.listStrategies().catch(() => []),
       ]);
 
       if (statusRes) setStatus(statusRes);
+      if (readinessRes) setReadiness(readinessRes);
       if (watchlistRes?.items && watchlistRes.items.length > 0) {
         setWatchlist(watchlistRes.items);
       } else {
@@ -132,6 +136,9 @@ export const App: React.FC = () => {
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
       />
 
+      {/* Global Trading Safety Status Bar */}
+      <SafetyStatusBar readiness={readiness} onRefresh={loadInitialData} />
+
       {/* Navigation Bar */}
       <TabNavigation
         activeTab={activeTab}
@@ -154,6 +161,7 @@ export const App: React.FC = () => {
           {activeTab === 'dashboard' && (
             <DashboardView
               status={status}
+              readiness={readiness}
               strategies={strategies}
               selectedSymbol={selectedSymbol}
               onNavigateTab={(tab) => setActiveTab(tab)}

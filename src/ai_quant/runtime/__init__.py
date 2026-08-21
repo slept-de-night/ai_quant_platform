@@ -39,7 +39,8 @@ from .handlers import ResearchRuntimeHandlers
 
 from .pit import PITObservation, PITStore
 from .clock import QuantClock, HistoricalClock, LiveClock
-from .snapshot import QuantSnapshot, SnapshotResolver
+from .facts import ResearchFact
+from .snapshot import QuantSnapshot, SnapshotResolver, ResearchSnapshot, ResearchSnapshotBuilder
 from .context import RuntimeMode, DecisionContext
 from .strategy import StrategyProtocol, StrategyDecision
 from .quant_runtime import UnifiedQuantRuntime, RuntimeResult
@@ -78,6 +79,9 @@ __all__ = [
     "LiveClock",
     "QuantSnapshot",
     "SnapshotResolver",
+    "ResearchFact",
+    "ResearchSnapshot",
+    "ResearchSnapshotBuilder",
     "RuntimeMode",
     "DecisionContext",
     "StrategyProtocol",

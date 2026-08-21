@@ -13,6 +13,7 @@ from ..intelligence.web_research import OpenAIWebResearcher
 from .gate import AIExecutionGate, ExecutionDecision, ExecutionKind, GateRequest
 from .models import RuntimeTask
 from .router import ModelRouter, RouteRequest
+from .snapshot import ResearchSnapshot
 
 
 class ResearchRuntimeHandlers:
@@ -25,12 +26,14 @@ class ResearchRuntimeHandlers:
         execute_ai: bool = False,
         router: Optional[ModelRouter] = None,
         gate: Optional[AIExecutionGate] = None,
+        snapshot: Optional[ResearchSnapshot] = None,
     ):
         self.cfg = cfg
         self.data_loader = data_loader
         self.execute_ai = execute_ai
         self.router = router or ModelRouter(cfg)
         self.gate = gate or AIExecutionGate(cfg, self.router)
+        self.snapshot = snapshot
 
     def handlers(self) -> Dict[str, Callable[[RuntimeTask, Dict[str, Dict[str, Any]]], Dict[str, Any]]]:
         return {
@@ -50,8 +53,15 @@ class ResearchRuntimeHandlers:
     def _clean_deps(deps: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [v for _, v in sorted(deps.items())]
 
+    def _get_bars(self, symbol: str, limit: int = 1000) -> Any:
+        if self.snapshot is not None:
+            cached = self.snapshot.get_bars(symbol)
+            if cached is not None:
+                return cached
+        return self.data_loader(symbol, limit)
+
     def extract(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        bars = self.data_loader(task.symbol or "SPY", 1000)
+        bars = self._get_bars(task.symbol or "SPY", 1000)
         view = analyze_technical(bars)
         return {"agent": task.agent_role, "kind": "technical", "view": view.model_dump(mode="json")}
 
@@ -60,7 +70,10 @@ class ResearchRuntimeHandlers:
             view = analyze_fundamental(None)
         else:
             try:
-                snap = SECCompanyFactsClient(self.cfg.sec_user_agent).snapshot(task.symbol)
+                if self.snapshot and self.snapshot.sec_snapshot and (self.snapshot.symbol.upper() == task.symbol.upper()):
+                    snap = self.snapshot.sec_snapshot
+                else:
+                    snap = SECCompanyFactsClient(self.cfg.sec_user_agent).snapshot(task.symbol)
                 view = analyze_fundamental(snap)
             except Exception as exc:
                 view = analyze_fundamental(None)
@@ -68,16 +81,18 @@ class ResearchRuntimeHandlers:
         return {"agent": task.agent_role, "kind": "fundamental", "view": view.model_dump(mode="json")}
 
     def trend(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        symbol_bars = self.data_loader(task.symbol or "SPY", 1000)
-        market = self.data_loader("SPY", 1000)
+        symbol_bars = self._get_bars(task.symbol or "SPY", 1000)
+        market = self._get_bars("SPY", 1000)
         if task.agent_role == "microtrend_agent":
             view = analyze_microtrend(symbol_bars, None, market)
             return {"agent": task.agent_role, "kind": "microtrend", "view": view.model_dump(mode="json")}
-        growth = self.data_loader("QQQ", 1000)
-        bond = self.data_loader("TLT", 1000)
-        gold = self.data_loader("GLD", 1000)
+        growth = self._get_bars("QQQ", 1000)
+        bond = self._get_bars("TLT", 1000)
+        gold = self._get_bars("GLD", 1000)
         macro = None
-        if self.cfg.fred_api_key:
+        if self.snapshot and self.snapshot.macro_snapshot:
+            macro = self.snapshot.macro_snapshot
+        elif self.cfg.fred_api_key:
             try:
                 macro = FREDClient(self.cfg.fred_api_key).snapshot()
             except Exception:

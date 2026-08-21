@@ -1238,6 +1238,72 @@ def get_platform_metrics():
 
 
 # ---------------------------------------------------------
+# Financial Knowledge & Pedagogical Explainability API
+# ---------------------------------------------------------
+
+class MetricExplanationRequest(BaseModel):
+    metric_id: str
+    value: Optional[Any] = None
+    symbol: str = "AAPL"
+    asset_type: str = "EQUITY"
+    sector: Optional[str] = None
+    percentile: Optional[float] = None
+
+
+@app.get("/api/v1/knowledge/metrics")
+def list_knowledge_metrics(
+    category: Optional[str] = Query(None, description="Filter by category (valuation, forensic, risk, portfolio, execution, macro)"),
+    search: Optional[str] = Query(None, description="Search keyword in metric name, summary, or usage"),
+):
+    """Lists registered financial and quantitative metric explanations with optional category or keyword search."""
+    from ..knowledge import MetricCategory, global_registry
+    reg = global_registry()
+    
+    if search:
+        metrics_list = reg.search(search)
+    elif category:
+        try:
+            cat_enum = MetricCategory(category.lower())
+            metrics_list = reg.list_by_category(cat_enum)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Allowed: {[c.value for c in MetricCategory]}")
+    else:
+        metrics_list = reg.all_metrics()
+        
+    return {
+        "count": len(metrics_list),
+        "metrics": [m.model_dump() for m in metrics_list],
+    }
+
+
+@app.get("/api/v1/knowledge/metrics/{metric_id}")
+def get_knowledge_metric_detail(metric_id: str):
+    """Retrieves deep pedagogical and quantitative documentation for a specific metric."""
+    from ..knowledge import global_registry
+    reg = global_registry()
+    metric = reg.get(metric_id)
+    if not metric:
+        raise HTTPException(status_code=404, detail=f"Metric '{metric_id}' not found in Financial Knowledge Registry")
+    return metric.model_dump()
+
+
+@app.post("/api/v1/knowledge/explain")
+def explain_metric_context(req: MetricExplanationRequest):
+    """Generates tailored contextual explanations with cross-asset applicability and threshold assessment."""
+    from ..knowledge import ContextualExplainer
+    explainer = ContextualExplainer()
+    res = explainer.explain(
+        metric_id=req.metric_id,
+        value=req.value,
+        symbol=req.symbol,
+        asset_type=req.asset_type,
+        sector=req.sector,
+        percentile=req.percentile,
+    )
+    return res
+
+
+# ---------------------------------------------------------
 # Static Frontend Mount (if folder exists)
 # ---------------------------------------------------------
 

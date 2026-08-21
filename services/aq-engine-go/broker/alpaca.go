@@ -126,16 +126,22 @@ func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, er
 	qtyInt, _ := strconv.Atoi(res.Qty)
 	now := time.Now().UTC()
 	return &BrokerOrder{
-		ID:            res.ID,
-		ClientOrderID: res.ClientOrderID,
-		Symbol:        res.Symbol,
-		Side:          res.Side,
-		Qty:           qtyInt,
-		FilledQty:     0,
-		Status:        res.Status,
-		LimitPrice:    order.ReferencePrice,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:               res.ID,
+		BrokerOrderID:    res.ID,
+		ClientOrderID:    res.ClientOrderID,
+		Symbol:           res.Symbol,
+		Side:             res.Side,
+		Qty:              qtyInt,
+		RequestedQty:     float64(qtyInt),
+		FilledQty:        0,
+		FilledQtyFloat:   0,
+		Status:           NormalizeBrokerStatus(res.Status),
+		RawStatus:        res.Status,
+		LimitPrice:       order.ReferencePrice,
+		AvgPrice:         order.ReferencePrice,
+		AverageFillPrice: order.ReferencePrice,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 

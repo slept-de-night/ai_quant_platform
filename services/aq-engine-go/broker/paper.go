@@ -53,17 +53,22 @@ func (p *PaperAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, err
 	brokerID := fmt.Sprintf("paper-%d", now.UnixNano())
 
 	bo := BrokerOrder{
-		ID:            brokerID,
-		ClientOrderID: order.ClientOrderID,
-		Symbol:        order.Symbol,
-		Side:          string(order.Side),
-		Qty:           order.Qty,
-		FilledQty:     order.Qty, // instantaneous simulated paper fill
-		Status:        "filled",
-		LimitPrice:    order.ReferencePrice,
-		AvgPrice:      order.ReferencePrice,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:               brokerID,
+		BrokerOrderID:    brokerID,
+		ClientOrderID:    order.ClientOrderID,
+		Symbol:           order.Symbol,
+		Side:             string(order.Side),
+		Qty:              order.Qty,
+		RequestedQty:     float64(order.Qty),
+		FilledQty:        order.Qty, // instantaneous simulated paper fill
+		FilledQtyFloat:   float64(order.Qty),
+		Status:           BrokerOrderStatusFilled,
+		RawStatus:        "filled",
+		LimitPrice:       order.ReferencePrice,
+		AvgPrice:         order.ReferencePrice,
+		AverageFillPrice: order.ReferencePrice,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 
 	p.orders[order.ClientOrderID] = bo
@@ -97,7 +102,8 @@ func (p *PaperAdapter) CancelOrder(clientOrderID string) error {
 	if !exists {
 		return fmt.Errorf("order not found: %s", clientOrderID)
 	}
-	ord.Status = "canceled"
+	ord.Status = BrokerOrderStatusCanceled
+	ord.RawStatus = "canceled"
 	ord.UpdatedAt = time.Now().UTC()
 	p.orders[clientOrderID] = ord
 	return nil
@@ -181,7 +187,7 @@ func (p *PaperAdapter) GetBrokerSnapshot() (*reconciliation.BrokerState, error) 
 			Side:          ord.Side,
 			RequestedQty:  ord.Qty,
 			FilledQty:     ord.FilledQty,
-			Status:        ord.Status,
+			Status:        string(ord.Status),
 			CreatedAt:     ord.CreatedAt,
 			UpdatedAt:     ord.UpdatedAt,
 		}

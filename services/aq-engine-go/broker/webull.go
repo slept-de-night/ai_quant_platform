@@ -120,16 +120,22 @@ func (w *WebullAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, er
 
 	now := time.Now().UTC()
 	return &BrokerOrder{
-		ID:            res.OrderID,
-		ClientOrderID: order.ClientOrderID,
-		Symbol:        order.Symbol,
-		Side:          string(order.Side),
-		Qty:           order.Qty,
-		FilledQty:     0,
-		Status:        res.Status,
-		LimitPrice:    order.ReferencePrice,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:               res.OrderID,
+		BrokerOrderID:    res.OrderID,
+		ClientOrderID:    order.ClientOrderID,
+		Symbol:           order.Symbol,
+		Side:             string(order.Side),
+		Qty:              order.Qty,
+		RequestedQty:     float64(order.Qty),
+		FilledQty:        0,
+		FilledQtyFloat:   0,
+		Status:           NormalizeBrokerStatus(res.Status),
+		RawStatus:        res.Status,
+		LimitPrice:       order.ReferencePrice,
+		AvgPrice:         order.ReferencePrice,
+		AverageFillPrice: order.ReferencePrice,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 

@@ -54,12 +54,13 @@ export interface PlatformStatus {
 
 export interface WatchlistAsset {
   symbol: string;
-  price: number;
-  change: number;
-  changePercent: number;
-  volume: string;
-  companyName: string;
-  sector: string;
+  price: number | null;
+  change: number | null;
+  changePercent: number | null;
+  volume: string | null;
+  companyName: string | null;
+  sector: string | null;
+  dataStatus?: 'live' | 'stale' | 'unavailable' | 'demo';
 }
 
 export interface StrategyItem {

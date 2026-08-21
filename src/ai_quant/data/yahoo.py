@@ -98,11 +98,12 @@ def fetch_real_stock_quote(symbol: str) -> Dict[str, Any]:
 
     return {
         "symbol": symbol.upper(),
-        "price": 100.0,
-        "previous_close": 100.0,
+        "price": None,
+        "previous_close": None,
         "currency": "USD",
         "exchange": "UNKNOWN",
         "instrument_type": "EQUITY",
+        "status": "unavailable",
     }
 
 

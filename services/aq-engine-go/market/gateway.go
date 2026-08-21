@@ -2,7 +2,6 @@ package market
 
 import (
 	"sync"
-	"time"
 
 	"aq-engine-go/models"
 )
@@ -44,12 +43,8 @@ func (g *Gateway) GetLatestTick(symbol string) (models.MarketTick, bool) {
 
 	tick, ok := g.latestTicks[symbol]
 	if !ok {
-		// Fallback synthetic baseline tick
 		return models.MarketTick{
-			Symbol:    symbol,
-			Price:     100.0,
-			Volume:    1000.0,
-			Timestamp: time.Now().UTC(),
+			Symbol: symbol,
 		}, false
 	}
 	return tick, true

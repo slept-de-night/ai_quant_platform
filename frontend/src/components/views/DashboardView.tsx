@@ -89,14 +89,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="p-4 rounded-xl bg-card border border-card-border relative overflow-hidden">
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span>Fund Starting Equity</span>
-            <DollarSignIcon className="w-4 h-4 text-accent-emerald" />
+            <span className="text-accent-emerald font-mono font-bold">$</span>
           </div>
           <div className="mt-2 text-2xl font-bold font-mono text-slate-100">
-            ${(status?.risk_limits.starting_equity || 100000).toLocaleString()}
+            {typeof status?.risk_limits?.starting_equity === 'number'
+              ? `$${status.risk_limits.starting_equity.toLocaleString()}`
+              : '—'}
           </div>
           <div className="mt-1 flex items-center gap-1 text-[11px] text-accent-emerald font-mono">
             <TrendingUp className="w-3 h-3" />
-            <span>Max Position: {( (status?.risk_limits.max_position_pct || 0.08) * 100).toFixed(0)}%</span>
+            <span>
+              Max Position:{' '}
+              {typeof status?.risk_limits?.max_position_pct === 'number'
+                ? `${(status.risk_limits.max_position_pct * 100).toFixed(0)}%`
+                : '—'}
+            </span>
           </div>
         </div>
 
@@ -107,10 +114,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <ShieldCheck className="w-4 h-4 text-accent-cyan" />
           </div>
           <div className="mt-2 text-2xl font-bold font-mono text-accent-cyan">
-            {isLoadingRisk ? '...' : `$${(riskMetrics?.var_95_usd || 1850).toLocaleString()}`}
+            {isLoadingRisk
+              ? '...'
+              : typeof riskMetrics?.var_95_usd === 'number'
+              ? `$${riskMetrics.var_95_usd.toLocaleString()}`
+              : '—'}
           </div>
           <div className="mt-1 text-[11px] text-slate-400 font-mono">
-            Expected Shortfall (cVaR): ${isLoadingRisk ? '...' : (riskMetrics?.cvar_95_usd || 2450).toLocaleString()}
+            Expected Shortfall (cVaR):{' '}
+            {isLoadingRisk
+              ? '...'
+              : typeof riskMetrics?.cvar_95_usd === 'number'
+              ? `$${riskMetrics.cvar_95_usd.toLocaleString()}`
+              : 'Unavailable'}
           </div>
         </div>
 
@@ -121,10 +137,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <Layers className="w-4 h-4 text-accent-purple" />
           </div>
           <div className="mt-2 text-2xl font-bold font-mono text-slate-100">
-            {validatedCount} <span className="text-xs text-slate-400 font-normal">/ {strategies.length} Candidate</span>
+            {validatedCount}{' '}
+            <span className="text-xs text-slate-400 font-normal">/ {strategies.length} Candidate</span>
           </div>
           <div className="mt-1 text-[11px] text-slate-400 font-mono">
-            Annualized Volatility: {isLoadingRisk ? '...' : `${((riskMetrics?.annualized_volatility || 0.16) * 100).toFixed(1)}%`}
+            Annualized Volatility:{' '}
+            {isLoadingRisk
+              ? '...'
+              : typeof riskMetrics?.annualized_volatility === 'number'
+              ? `${(riskMetrics.annualized_volatility * 100).toFixed(1)}%`
+              : 'Unavailable'}
           </div>
         </div>
 
@@ -135,16 +157,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <Cpu className="w-4 h-4 text-accent-amber" />
           </div>
           <div className="mt-2 flex items-center gap-2">
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent-emerald opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-accent-emerald"></span>
-            </span>
-            <span className="text-xl font-bold font-mono text-slate-100">
-              {status?.go_engine?.status === 'healthy' ? 'Go Microsecond' : 'Active (Python)'}
-            </span>
+            {status?.go_engine?.status === 'healthy' ? (
+              <>
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent-emerald opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-accent-emerald"></span>
+                </span>
+                <span className="text-xl font-bold font-mono text-slate-100">
+                  Go Engine Online
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="h-3 w-3 rounded-full bg-slate-600"></span>
+                <span className="text-xl font-bold font-mono text-slate-400">
+                  {status?.go_engine?.status ? status.go_engine.status.toUpperCase() : 'UNKNOWN'}
+                </span>
+              </>
+            )}
           </div>
           <div className="mt-1 text-[11px] text-slate-400 font-mono">
-            Mode: Paper Broker Safe | Uptime: {status?.go_engine?.uptime_seconds ? `${Math.floor(status.go_engine.uptime_seconds)}s` : 'Active'}
+            Mode: {status?.go_engine?.execution_mode || 'PAPER'} | Uptime:{' '}
+            {typeof status?.go_engine?.uptime_seconds === 'number'
+              ? `${Math.floor(status.go_engine.uptime_seconds)}s`
+              : '—'}
           </div>
         </div>
       </div>

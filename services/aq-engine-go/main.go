@@ -93,10 +93,36 @@ func main() {
 		log.Printf("[BROKER POSTURE] Active broker set to default Paper Simulation Adapter")
 	}
 
-	// Seed some baseline market ticks
-	gateway.PublishTick(models.MarketTick{Symbol: "SPY", Price: 512.45, Volume: 4500000, Timestamp: time.Now().UTC()})
-	gateway.PublishTick(models.MarketTick{Symbol: "NVDA", Price: 128.50, Volume: 12000000, Timestamp: time.Now().UTC()})
-	gateway.PublishTick(models.MarketTick{Symbol: "QQQ", Price: 445.20, Volume: 3200000, Timestamp: time.Now().UTC()})
+	// Market Ticks Startup: Default to UNAVAILABLE unless DEMO_MARKET_DATA=true is explicitly set
+	if strings.EqualFold(os.Getenv("DEMO_MARKET_DATA"), "true") {
+		gateway.PublishTick(models.MarketTick{
+			Symbol:      "SPY",
+			Price:       512.45,
+			Volume:      4500000,
+			Timestamp:   time.Now().UTC(),
+			Source:      "demo",
+			IsSimulated: true,
+		})
+		gateway.PublishTick(models.MarketTick{
+			Symbol:      "NVDA",
+			Price:       128.50,
+			Volume:      12000000,
+			Timestamp:   time.Now().UTC(),
+			Source:      "demo",
+			IsSimulated: true,
+		})
+		gateway.PublishTick(models.MarketTick{
+			Symbol:      "QQQ",
+			Price:       445.20,
+			Volume:      3200000,
+			Timestamp:   time.Now().UTC(),
+			Source:      "demo",
+			IsSimulated: true,
+		})
+		log.Printf("[MARKET GATEWAY] DEMO_MARKET_DATA=true; published simulated demonstration ticks")
+	} else {
+		log.Printf("[MARKET GATEWAY] Production/Paper posture: No market ticks seeded (status: UNAVAILABLE)")
+	}
 
 	// Startup Reconciliation Gate
 	activeB, _ := brokerReg.GetActive()

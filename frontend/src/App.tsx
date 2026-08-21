@@ -37,18 +37,18 @@ export const App: React.FC = () => {
       if (watchlistRes?.items && watchlistRes.items.length > 0) {
         setWatchlist(watchlistRes.items);
       } else {
-        // Institutional Default Seed Watchlist
+        // Explicitly un-fetched / un-priced watchlist items
         setWatchlist([
-          { symbol: 'NVDA', price: 128.50, change: 2.70, changePercent: 2.15, volume: '48.2M', companyName: 'NVIDIA Corporation', sector: 'Semiconductors' },
-          { symbol: 'SPY', price: 582.40, change: 3.80, changePercent: 0.65, volume: '62.1M', companyName: 'SPDR S&P 500 ETF', sector: 'Index' },
-          { symbol: 'QQQ', price: 489.12, change: 4.10, changePercent: 0.85, volume: '34.5M', companyName: 'Invesco QQQ Trust', sector: 'Technology' },
-          { symbol: 'AAPL', price: 224.30, change: 1.10, changePercent: 0.49, volume: '28.9M', companyName: 'Apple Inc.', sector: 'Consumer Tech' },
-          { symbol: 'MSFT', price: 418.90, change: 2.90, changePercent: 0.70, volume: '19.4M', companyName: 'Microsoft Corporation', sector: 'Software' },
-          { symbol: 'TSLA', price: 218.60, change: 7.20, changePercent: 3.41, volume: '55.8M', companyName: 'Tesla Inc.', sector: 'Auto/CleanTech' },
-          { symbol: 'AMZN', price: 178.25, change: 1.85, changePercent: 1.05, volume: '24.1M', companyName: 'Amazon.com Inc.', sector: 'E-Commerce' },
-          { symbol: 'META', price: 512.10, change: 6.40, changePercent: 1.27, volume: '14.2M', companyName: 'Meta Platforms Inc.', sector: 'Social Tech' },
-          { symbol: 'GLD', price: 232.40, change: -0.80, changePercent: -0.34, volume: '8.1M', companyName: 'SPDR Gold Shares', sector: 'Commodities' },
-          { symbol: 'TLT', price: 92.15, change: -0.45, changePercent: -0.49, volume: '18.3M', companyName: 'iShares 20+ Year Treasury', sector: 'Bonds' },
+          { symbol: 'NVDA', price: null, change: null, changePercent: null, volume: null, companyName: 'NVIDIA Corporation', sector: 'Semiconductors', dataStatus: 'unavailable' },
+          { symbol: 'SPY', price: null, change: null, changePercent: null, volume: null, companyName: 'SPDR S&P 500 ETF', sector: 'Index', dataStatus: 'unavailable' },
+          { symbol: 'QQQ', price: null, change: null, changePercent: null, volume: null, companyName: 'Invesco QQQ Trust', sector: 'Technology', dataStatus: 'unavailable' },
+          { symbol: 'AAPL', price: null, change: null, changePercent: null, volume: null, companyName: 'Apple Inc.', sector: 'Consumer Tech', dataStatus: 'unavailable' },
+          { symbol: 'MSFT', price: null, change: null, changePercent: null, volume: null, companyName: 'Microsoft Corporation', sector: 'Software', dataStatus: 'unavailable' },
+          { symbol: 'TSLA', price: null, change: null, changePercent: null, volume: null, companyName: 'Tesla Inc.', sector: 'Auto/CleanTech', dataStatus: 'unavailable' },
+          { symbol: 'AMZN', price: null, change: null, changePercent: null, volume: null, companyName: 'Amazon.com Inc.', sector: 'E-Commerce', dataStatus: 'unavailable' },
+          { symbol: 'META', price: null, change: null, changePercent: null, volume: null, companyName: 'Meta Platforms Inc.', sector: 'Social Tech', dataStatus: 'unavailable' },
+          { symbol: 'GLD', price: null, change: null, changePercent: null, volume: null, companyName: 'SPDR Gold Shares', sector: 'Commodities', dataStatus: 'unavailable' },
+          { symbol: 'TLT', price: null, change: null, changePercent: null, volume: null, companyName: 'iShares 20+ Year Treasury', sector: 'Bonds', dataStatus: 'unavailable' },
         ]);
       }
       if (strategiesRes) setStrategies(strategiesRes);
@@ -77,29 +77,36 @@ export const App: React.FC = () => {
         api.getFundamentals(cleanSym).catch(() => ({})),
       ]);
 
+      const priceVal = typeof quote.regular_market_price === 'number' ? quote.regular_market_price : typeof quote.price === 'number' ? quote.price : null;
+      const changeVal = typeof quote.change === 'number' ? quote.change : null;
+      const changePctVal = typeof quote.change_pct === 'number' ? quote.change_pct : typeof quote.changePercent === 'number' ? quote.changePercent : null;
+      const volVal = typeof quote.volume === 'number' && quote.volume > 0 ? `${(quote.volume / 1e6).toFixed(1)}M` : null;
+
       const newAsset: WatchlistAsset = {
         symbol: cleanSym,
-        price: quote.regular_market_price || quote.price || 150.0,
-        change: quote.change || 1.25,
-        changePercent: quote.change_pct || quote.changePercent || 0.85,
-        volume: quote.volume ? `${(quote.volume / 1e6).toFixed(1)}M` : '15.4M',
-        companyName: fund.company_name || quote.short_name || `${cleanSym} Corp`,
-        sector: fund.sector || 'Equities',
+        price: priceVal,
+        change: changeVal,
+        changePercent: changePctVal,
+        volume: volVal,
+        companyName: fund.company_name || quote.short_name || null,
+        sector: fund.sector || null,
+        dataStatus: priceVal !== null ? 'live' : 'unavailable',
       };
 
       setWatchlist((prev) => [newAsset, ...prev.filter((a) => a.symbol !== cleanSym)]);
       setSelectedSymbol(cleanSym);
     } catch (err) {
       console.error('Error adding symbol to watchlist:', err);
-      // Fallback: create basic placeholder asset and select it
+      // Fallback: create asset with null price/dataStatus=unavailable
       const fallbackAsset: WatchlistAsset = {
         symbol: cleanSym,
-        price: 150.0,
-        change: 0.0,
-        changePercent: 0.0,
-        volume: '10.0M',
-        companyName: `${cleanSym} Corporation`,
-        sector: 'Equities',
+        price: null,
+        change: null,
+        changePercent: null,
+        volume: null,
+        companyName: null,
+        sector: null,
+        dataStatus: 'unavailable',
       };
       setWatchlist((prev) => [fallbackAsset, ...prev.filter((a) => a.symbol !== cleanSym)]);
       setSelectedSymbol(cleanSym);

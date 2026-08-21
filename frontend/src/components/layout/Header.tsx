@@ -114,10 +114,16 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <span className="font-bold text-slate-200">{asset.symbol}</span>
-            <span className="text-slate-400">${asset.price.toFixed(2)}</span>
-            <span className={`font-semibold ${asset.change >= 0 ? 'text-accent-emerald' : 'text-accent-rose'}`}>
-              {asset.change >= 0 ? '+' : ''}{asset.changePercent.toFixed(2)}%
+            <span className="text-slate-400">
+              {typeof asset.price === 'number' ? `$${asset.price.toFixed(2)}` : '—'}
             </span>
+            {typeof asset.change === 'number' && typeof asset.changePercent === 'number' ? (
+              <span className={`font-semibold ${asset.change >= 0 ? 'text-accent-emerald' : 'text-accent-rose'}`}>
+                {asset.change >= 0 ? '+' : ''}{asset.changePercent.toFixed(2)}%
+              </span>
+            ) : (
+              <span className="text-slate-500 font-normal">unavailable</span>
+            )}
           </div>
         ))}
       </div>

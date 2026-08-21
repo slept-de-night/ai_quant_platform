@@ -119,9 +119,11 @@ func DefaultRiskConfig() RiskConfig {
 }
 
 type MarketTick struct {
-	Symbol    string    `json:"symbol"`
-	Price     float64   `json:"price"`
-	Volume    float64   `json:"volume"`
-	Timestamp time.Time `json:"timestamp"`
+	Symbol      string    `json:"symbol"`
+	Price       float64   `json:"price"`
+	Volume      float64   `json:"volume"`
+	Timestamp   time.Time `json:"timestamp"`
+	Source      string    `json:"source,omitempty"`
+	IsSimulated bool      `json:"is_simulated,omitempty"`
 }
 

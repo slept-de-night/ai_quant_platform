@@ -1,16 +1,20 @@
 package broker
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
 
 	"aq-engine-go/models"
 	"aq-engine-go/reconciliation"
+)
+
+type WebullEnvironment string
+
+const (
+	WebullSandbox WebullEnvironment = "SANDBOX"
+	WebullLive    WebullEnvironment = "LIVE"
 )
 
 type WebullAdapter struct {
@@ -23,26 +27,28 @@ type WebullAdapter struct {
 	baseURL     string
 	client      *http.Client
 	isPaper     bool
-	localMock   *PaperAdapter // fallback simulation when credentials not yet loaded
+	environment WebullEnvironment
 }
 
 func NewWebullAdapter(name, appKey, appSecret, accountID string, isPaper bool) *WebullAdapter {
 	if name == "" {
 		name = "webull-main"
 	}
+	env := WebullLive
 	baseURL := "https://quoteapi.webullbroker.com/api"
 	if isPaper {
+		env = WebullSandbox
 		baseURL = "https://quoteapi.webullfintech.com/api"
 	}
 	return &WebullAdapter{
-		name:      name,
-		appKey:    appKey,
-		appSecret: appSecret,
-		accountID: accountID,
-		baseURL:   baseURL,
-		isPaper:   isPaper,
-		client:    &http.Client{Timeout: 10 * time.Second},
-		localMock: NewPaperAdapter("webull-paper-sim", 100000.0),
+		name:        name,
+		appKey:      appKey,
+		appSecret:   appSecret,
+		accountID:   accountID,
+		environment: env,
+		baseURL:     baseURL,
+		isPaper:     isPaper,
+		client:      &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -61,132 +67,86 @@ func (w *WebullAdapter) Environment() Environment {
 	return EnvLive
 }
 
+func (w *WebullAdapter) WebullEnv() WebullEnvironment {
+	return w.environment
+}
+
 func (w *WebullAdapter) IsConfigured() bool {
 	return w.appKey != "" && w.appSecret != ""
 }
 
+func (w *WebullAdapter) Capabilities() BrokerCapabilities {
+	// In Phase W0 quarantine: all capabilities are false until official OpenAPI client is certified.
+	return BrokerCapabilities{
+		SubmitOrder:     false,
+		CancelOrder:     false,
+		QueryOrder:      false,
+		ListOrders:      false,
+		ListPositions:   false,
+		AccountState:    false,
+		MarketData:      false,
+		ExecutionEvents: false,
+		Reconciliation:  false,
+	}
+}
+
 func (w *WebullAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, error) {
 	if !w.IsConfigured() {
-		// Run via local simulation buffer if credentials not set
-		return w.localMock.SubmitOrder(order)
+		return nil, ErrBrokerNotConfigured
 	}
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	payload := map[string]interface{}{
-		"account_id":      w.accountID,
-		"client_order_id": order.ClientOrderID,
-		"symbol":          order.Symbol,
-		"action":          string(order.Side),
-		"order_type":      "MARKET",
-		"quantity":        order.Qty,
-		"time_in_force":   "DAY",
-	}
-
-	reqBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", w.baseURL+"/v1/trade/order/place", bytes.NewBuffer(reqBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("app-key", w.appKey)
-	req.Header.Set("app-secret", w.appSecret)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := w.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("webull order submit failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("webull api error (%d): %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	var res struct {
-		OrderID       string `json:"order_id"`
-		ClientOrderID string `json:"client_order_id"`
-		Status        string `json:"status"`
-	}
-	if err := json.Unmarshal(bodyBytes, &res); err != nil {
-		return nil, err
-	}
-
-	now := time.Now().UTC()
-	return &BrokerOrder{
-		ID:               res.OrderID,
-		BrokerOrderID:    res.OrderID,
-		ClientOrderID:    order.ClientOrderID,
-		Symbol:           order.Symbol,
-		Side:             string(order.Side),
-		Qty:              order.Qty,
-		RequestedQty:     float64(order.Qty),
-		FilledQty:        0,
-		FilledQtyFloat:   0,
-		Status:           NormalizeBrokerStatus(res.Status),
-		RawStatus:        res.Status,
-		LimitPrice:       order.ReferencePrice,
-		AvgPrice:         order.ReferencePrice,
-		AverageFillPrice: order.ReferencePrice,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}, nil
+	return nil, fmt.Errorf("webull order submit unavailable: adapter quarantined pending official OpenAPI client (Phase W1)")
 }
 
 func (w *WebullAdapter) CancelOrder(clientOrderID string) error {
 	if !w.IsConfigured() {
-		return w.localMock.CancelOrder(clientOrderID)
+		return ErrBrokerNotConfigured
 	}
-	return nil
+	return fmt.Errorf("webull cancel order unavailable: adapter quarantined pending official OpenAPI client (Phase W1)")
 }
 
 func (w *WebullAdapter) GetOrder(clientOrderID string) (*BrokerOrder, error) {
 	if !w.IsConfigured() {
-		return w.localMock.GetOrder(clientOrderID)
+		return nil, ErrBrokerNotConfigured
 	}
-	return nil, fmt.Errorf("webull get order not implemented for live")
+	return nil, fmt.Errorf("webull get order unavailable: adapter quarantined pending official OpenAPI client (Phase W1)")
 }
 
 func (w *WebullAdapter) ListOrders() ([]BrokerOrder, error) {
 	if !w.IsConfigured() {
-		return w.localMock.ListOrders()
+		return nil, ErrBrokerNotConfigured
 	}
-	return []BrokerOrder{}, nil
+	return nil, fmt.Errorf("webull list orders unavailable: adapter quarantined pending official OpenAPI client (Phase W1)")
 }
 
 func (w *WebullAdapter) ListPositions() ([]BrokerPosition, error) {
 	if !w.IsConfigured() {
-		return w.localMock.ListPositions()
+		return nil, ErrBrokerNotConfigured
 	}
-	return []BrokerPosition{}, nil
+	return nil, fmt.Errorf("webull list positions unavailable: adapter quarantined pending official OpenAPI client (Phase W1)")
 }
 
 func (w *WebullAdapter) GetAccountState() (*AccountState, error) {
 	if !w.IsConfigured() {
-		return w.localMock.GetAccountState()
+		return nil, ErrBrokerNotConfigured
 	}
-	return &AccountState{Cash: 100000.0, Equity: 100000.0, BuyingPower: 200000.0, Currency: "USD"}, nil
+	return nil, fmt.Errorf("webull account state unavailable: adapter quarantined pending official OpenAPI client (Phase W1)")
 }
 
 func (w *WebullAdapter) GetHealth() Health {
 	configured := w.IsConfigured()
-	msg := "Webull OpenAPI plug-and-play adapter active"
+	caps := w.Capabilities()
+	msg := "Webull OpenAPI adapter is quarantined pending official OpenAPI sandbox implementation (Phase W1-W4)"
 	if !configured {
-		msg = "Webull adapter unconfigured (credentials missing); not ready for broker execution"
+		msg = "Webull adapter unconfigured (WEBULL_APP_KEY or WEBULL_APP_SECRET missing); not ready for broker execution"
 	}
 	return Health{
-		Ready:         configured,
-		Connected:     configured,
+		Ready:         false, // Always false in Phase W0 quarantine
+		Connected:     false,
 		Configured:    configured,
 		Broker:        BrokerKindWebull,
 		Name:          w.name,
 		Environment:   w.Environment(),
+		Capabilities:  &caps,
 		Message:       msg,
 		LastCheckedAt: time.Now().UTC(),
 	}
@@ -194,14 +154,8 @@ func (w *WebullAdapter) GetHealth() Health {
 
 func (w *WebullAdapter) GetBrokerSnapshot() (*reconciliation.BrokerState, error) {
 	if !w.IsConfigured() {
-		return w.localMock.GetBrokerSnapshot()
+		return nil, ErrBrokerNotConfigured
 	}
-	now := time.Now().UTC()
-	return &reconciliation.BrokerState{
-		Orders:    make(map[string]reconciliation.OrderState),
-		Positions: make(map[string]reconciliation.PositionState),
-		Cash:      100000.0,
-		Equity:    100000.0,
-		Timestamp: now,
-	}, nil
+	return nil, fmt.Errorf("webull broker snapshot unavailable: adapter quarantined pending official OpenAPI client (Phase W1)")
 }
+

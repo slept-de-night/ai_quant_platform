@@ -203,10 +203,65 @@ func TestBrokerContractSuite_AlpacaAdapterOffline(t *testing.T) {
 	runBrokerContractSuite(t, alpaca)
 }
 
-func TestBrokerContractSuite_WebullAdapter(t *testing.T) {
-	// Webull unconfigured uses local paper fallback which must also obey contract invariants
-	webull := NewWebullAdapter("webull-contract-test", "", "", "", true)
-	runBrokerContractSuite(t, webull)
+func TestBrokerContractSuite_WebullQuarantine(t *testing.T) {
+	// 1. Unconfigured Webull must fail closed with ErrBrokerNotConfigured and never masquerade as paper
+	webullUnconfigured := NewWebullAdapter("webull-unconfigured", "", "", "", true)
+	if webullUnconfigured.IsConfigured() {
+		t.Fatalf("Unconfigured adapter reported IsConfigured=true")
+	}
+
+	hUnconf := webullUnconfigured.GetHealth()
+	if hUnconf.Ready || hUnconf.Connected || hUnconf.Configured {
+		t.Fatalf("Unconfigured health must be false for Ready, Connected, Configured; got %+v", hUnconf)
+	}
+
+	if _, err := webullUnconfigured.SubmitOrder(&models.OrderIntent{Symbol: "NVDA", Side: models.SideBuy, Qty: 10}); err != ErrBrokerNotConfigured {
+		t.Fatalf("Expected ErrBrokerNotConfigured on SubmitOrder, got %v", err)
+	}
+	if err := webullUnconfigured.CancelOrder("client-1"); err != ErrBrokerNotConfigured {
+		t.Fatalf("Expected ErrBrokerNotConfigured on CancelOrder, got %v", err)
+	}
+	if _, err := webullUnconfigured.GetOrder("client-1"); err != ErrBrokerNotConfigured {
+		t.Fatalf("Expected ErrBrokerNotConfigured on GetOrder, got %v", err)
+	}
+	if _, err := webullUnconfigured.ListOrders(); err != ErrBrokerNotConfigured {
+		t.Fatalf("Expected ErrBrokerNotConfigured on ListOrders, got %v", err)
+	}
+	if _, err := webullUnconfigured.ListPositions(); err != ErrBrokerNotConfigured {
+		t.Fatalf("Expected ErrBrokerNotConfigured on ListPositions, got %v", err)
+	}
+	if _, err := webullUnconfigured.GetAccountState(); err != ErrBrokerNotConfigured {
+		t.Fatalf("Expected ErrBrokerNotConfigured on GetAccountState, got %v", err)
+	}
+	if _, err := webullUnconfigured.GetBrokerSnapshot(); err != ErrBrokerNotConfigured {
+		t.Fatalf("Expected ErrBrokerNotConfigured on GetBrokerSnapshot, got %v", err)
+	}
+
+	// 2. Configured Webull in Phase W0 must report Ready=false, Connected=false, and refuse fake execution
+	webullConfigured := NewWebullAdapter("webull-configured", "test_app_key", "test_app_secret", "test_account", true)
+	if !webullConfigured.IsConfigured() {
+		t.Fatalf("Configured adapter reported IsConfigured=false")
+	}
+	hConf := webullConfigured.GetHealth()
+	if hConf.Ready || hConf.Connected {
+		t.Fatalf("Quarantined adapter must report Ready=false, Connected=false; got %+v", hConf)
+	}
+	if !hConf.Configured {
+		t.Fatalf("Configured adapter must report Configured=true")
+	}
+	if hConf.Capabilities == nil || hConf.Capabilities.SubmitOrder {
+		t.Fatalf("Quarantined capabilities must be all false")
+	}
+
+	if _, err := webullConfigured.SubmitOrder(&models.OrderIntent{Symbol: "NVDA", Side: models.SideBuy, Qty: 10}); err == nil {
+		t.Fatalf("Quarantined adapter must reject order placement")
+	}
+	if _, err := webullConfigured.GetAccountState(); err == nil {
+		t.Fatalf("Quarantined adapter must reject fake account state")
+	}
+	if _, err := webullConfigured.GetBrokerSnapshot(); err == nil {
+		t.Fatalf("Quarantined adapter must reject fake broker snapshot")
+	}
 }
 
 func TestAlpacaStrictPayloadParsingErrors(t *testing.T) {

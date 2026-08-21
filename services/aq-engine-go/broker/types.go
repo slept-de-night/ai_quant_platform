@@ -1,8 +1,14 @@
 package broker
 
 import (
+	"errors"
 	"strings"
 	"time"
+)
+
+var (
+	ErrBrokerNotConfigured = errors.New("broker adapter is not configured with credentials")
+	ErrOrderNotFound       = errors.New("order not found on broker")
 )
 
 type BrokerKind string
@@ -21,6 +27,18 @@ const (
 	EnvPaper      Environment = "paper"
 	EnvLive       Environment = "live"
 )
+
+type BrokerCapabilities struct {
+	SubmitOrder     bool `json:"submit_order"`
+	CancelOrder     bool `json:"cancel_order"`
+	QueryOrder      bool `json:"query_order"`
+	ListOrders      bool `json:"list_orders"`
+	ListPositions   bool `json:"list_positions"`
+	AccountState    bool `json:"account_state"`
+	MarketData      bool `json:"market_data"`
+	ExecutionEvents bool `json:"execution_events"`
+	Reconciliation  bool `json:"reconciliation"`
+}
 
 type BrokerOrderStatus string
 
@@ -100,12 +118,13 @@ type AccountState struct {
 type BrokerAccount = AccountState
 
 type Health struct {
-	Ready         bool        `json:"ready"`
-	Connected     bool        `json:"connected"`
-	Configured    bool        `json:"configured"`
-	Broker        BrokerKind  `json:"broker"`
-	Name          string      `json:"name"`
-	Environment   Environment `json:"environment"`
-	Message       string      `json:"message"`
-	LastCheckedAt time.Time   `json:"last_checked_at"`
+	Ready         bool                `json:"ready"`
+	Connected     bool                `json:"connected"`
+	Configured    bool                `json:"configured"`
+	Broker        BrokerKind          `json:"broker"`
+	Name          string              `json:"name"`
+	Environment   Environment         `json:"environment"`
+	Capabilities  *BrokerCapabilities `json:"capabilities,omitempty"`
+	Message       string              `json:"message"`
+	LastCheckedAt time.Time           `json:"last_checked_at"`
 }

@@ -15,6 +15,8 @@ import {
   ArrowRight,
   Server,
   Zap,
+  BookOpen,
+  HelpCircle,
 } from 'lucide-react';
 import { HeaderSearchAutocomplete } from '../../features/market/HeaderSearchAutocomplete';
 
@@ -28,6 +30,9 @@ interface HeaderProps {
   onAddSymbol: (symbol: string) => Promise<void>;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
+  learningMode?: boolean;
+  onToggleLearningMode?: () => void;
+  onOpenKnowledgeBase?: (metricId?: string) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -40,6 +45,9 @@ export const Header: React.FC<HeaderProps> = ({
   onAddSymbol,
   isSidebarOpen,
   onToggleSidebar,
+  learningMode = false,
+  onToggleLearningMode,
+  onOpenKnowledgeBase,
 }) => {
   const [time, setTime] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -302,6 +310,31 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </div>
 
+
+          {/* Learning Mode Toggle */}
+          <button
+            onClick={onToggleLearningMode}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-xs font-semibold transition cursor-pointer border ${
+              learningMode
+                ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300'
+                : 'bg-background border-card-border text-slate-400 hover:text-slate-200'
+            }`}
+            title="Toggle Learning Mode (pedagogical metric tooltips and risk explanations)"
+          >
+            <BookOpen className={`w-3.5 h-3.5 ${learningMode ? 'text-emerald-400' : 'text-slate-400'}`} />
+            <span className="hidden md:inline">LEARNING:</span>
+            <span>{learningMode ? 'ON' : 'OFF'}</span>
+          </button>
+
+          {/* Knowledge Base Modal Trigger */}
+          <button
+            onClick={() => onOpenKnowledgeBase && onOpenKnowledgeBase()}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-background hover:bg-card-border border border-card-border text-slate-300 hover:text-white transition font-mono text-xs font-semibold"
+            title="Open Quantitative & Financial Knowledge Registry"
+          >
+            <HelpCircle className="w-3.5 h-3.5 text-accent-cyan" />
+            <span className="hidden lg:inline">KNOWLEDGE</span>
+          </button>
 
           {/* Clock */}
           <div className="hidden xl:flex items-center gap-1.5 text-slate-400 text-xs font-mono">

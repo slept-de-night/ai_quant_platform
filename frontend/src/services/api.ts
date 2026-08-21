@@ -375,6 +375,41 @@ export const api = {
     if (!res.ok) throw new Error(`Metrics error: ${res.statusText}`);
     return res.json();
   },
+
+  // Financial Knowledge & Explainability
+  getKnowledgeMetrics: async (category?: string, search?: string) => {
+    const params = new URLSearchParams();
+    if (category) params.set('category', category);
+    if (search) params.set('search', search);
+    const qs = params.toString();
+    const url = qs ? `${API_BASE}/v1/knowledge/metrics?${qs}` : `${API_BASE}/v1/knowledge/metrics`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Knowledge metrics error: ${res.statusText}`);
+    return res.json();
+  },
+
+  getKnowledgeMetricDetail: async (metricId: string) => {
+    const res = await fetch(`${API_BASE}/v1/knowledge/metrics/${metricId}`);
+    if (!res.ok) throw new Error(`Knowledge metric detail error: ${res.statusText}`);
+    return res.json();
+  },
+
+  explainMetric: async (payload: {
+    metric_id: string;
+    value?: any;
+    symbol?: string;
+    asset_type?: string;
+    sector?: string;
+    percentile?: number;
+  }) => {
+    const res = await fetch(`${API_BASE}/v1/knowledge/explain`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(`Explain metric error: ${res.statusText}`);
+    return res.json();
+  },
 };
 
 

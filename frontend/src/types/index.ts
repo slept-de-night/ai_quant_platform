@@ -102,6 +102,37 @@ export interface BacktestResponse {
   daily: DailyRecord[];
 }
 
+export interface FinancialMetricExplanation {
+  id: string;
+  name: string;
+  category: 'valuation' | 'forensic' | 'risk' | 'portfolio' | 'execution' | 'macro';
+  summary: string;
+  formula: string;
+  interpretation: string;
+  quant_usage: string;
+  pitfalls: string;
+  ranges?: Record<string, string>;
+  related_metrics?: string[];
+}
+
+export interface MetricExplanationResult {
+  metric_id: string;
+  name?: string;
+  category?: string;
+  summary?: string;
+  formula?: string;
+  is_applicable: boolean;
+  inapplicable_reason?: string;
+  recommended_alternative?: string;
+  current_value?: any;
+  assessment?: string;
+  zone?: string;
+  quant_impact?: string;
+  pitfalls?: string;
+  related_metrics?: string[];
+  error?: string;
+}
+
 export interface ValidationReport {
   strategy_name: string;
   folds_evaluated: number;

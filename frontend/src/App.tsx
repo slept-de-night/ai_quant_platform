@@ -14,11 +14,30 @@ import { PaperTradingDeskView } from './components/views/PaperTradingDeskView';
 import { MemoryAuditView } from './components/views/MemoryAuditView';
 import { InstitutionalArchitectureView } from './components/views/InstitutionalArchitectureView';
 import { ChatGPTQuantCopilot } from './components/chat/ChatGPTQuantCopilot';
+import { KnowledgeBaseModal } from './components/knowledge/KnowledgeBaseModal';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
   const [selectedSymbol, setSelectedSymbol] = useState<string>('NVDA');
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
+
+  // Learning Mode and Knowledge Base state
+  const [learningMode, setLearningMode] = useState<boolean>(() => localStorage.getItem('aq_learning_mode') === 'true');
+  const [isKnowledgeBaseOpen, setIsKnowledgeBaseOpen] = useState<boolean>(false);
+  const [knowledgeBaseInitialMetric, setKnowledgeBaseInitialMetric] = useState<string | null>(null);
+
+  const toggleLearningMode = () => {
+    setLearningMode((prev) => {
+      const next = !prev;
+      localStorage.setItem('aq_learning_mode', String(next));
+      return next;
+    });
+  };
+
+  const handleOpenKnowledgeBase = (metricId?: string) => {
+    setKnowledgeBaseInitialMetric(metricId ?? null);
+    setIsKnowledgeBaseOpen(true);
+  };
 
   const [status, setStatus] = useState<PlatformStatus | null>(null);
   const [readiness, setReadiness] = useState<ReadinessReport | null>(null);
@@ -134,6 +153,9 @@ export const App: React.FC = () => {
         onAddSymbol={handleAddSymbol}
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+        learningMode={learningMode}
+        onToggleLearningMode={toggleLearningMode}
+        onOpenKnowledgeBase={handleOpenKnowledgeBase}
       />
 
       {/* Global Trading Safety Status Bar */}
@@ -208,6 +230,13 @@ export const App: React.FC = () => {
 
       {/* Interactive ChatGPT Quant Co-Pilot Floating Chat Drawer */}
       <ChatGPTQuantCopilot selectedSymbol={selectedSymbol} />
+
+      {/* Financial Knowledge & Pedagogical Modal */}
+      <KnowledgeBaseModal
+        isOpen={isKnowledgeBaseOpen}
+        onClose={() => setIsKnowledgeBaseOpen(false)}
+        initialMetricId={knowledgeBaseInitialMetric}
+      />
     </div>
   );
 };

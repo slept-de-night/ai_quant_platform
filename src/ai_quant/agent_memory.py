@@ -4,6 +4,22 @@ from .intelligence.agent_memory import (
     MemoryKind,
     MemoryNote,
     AgentMemoryStore,
+    ClaimDirection,
+    Contradiction,
+    extract_entities,
+    classify_claim_direction,
+    calculate_decayed_confidence,
+    detect_contradictions,
 )
 
-__all__ = ["MemoryKind", "MemoryNote", "AgentMemoryStore"]
+__all__ = [
+    "MemoryKind",
+    "MemoryNote",
+    "AgentMemoryStore",
+    "ClaimDirection",
+    "Contradiction",
+    "extract_entities",
+    "classify_claim_direction",
+    "calculate_decayed_confidence",
+    "detect_contradictions",
+]

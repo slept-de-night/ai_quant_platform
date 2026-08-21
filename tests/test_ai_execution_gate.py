@@ -255,3 +255,51 @@ def test_routine_refresh_acceptance_zero_ai_calls(test_cfg):
     gate_stats = orchestrator.gate.summary_stats(run_id=root_id)
     assert gate_stats["ai_tasks"] == 0, f"Expected 0 AI calls on routine refresh, got {gate_stats['ai_tasks']}"
     assert gate_stats["ai_calls_avoided"] == gate_stats["total_decisions"]
+
+
+def test_handler_gate_respects_task_payload_force_refresh(test_cfg):
+    """When execute_ai=True, gate can still skip if force_refresh is not requested in payload."""
+    data_loader = lambda sym, bars: synthetic_bars(sym, bars)
+    handlers = ResearchRuntimeHandlers(test_cfg, data_loader, execute_ai=True)
+
+    from datetime import datetime, timezone
+    from ai_quant.runtime.models import RuntimeTask
+
+    # Task without force_refresh (default) and low materiality -> skips AI
+    task_routine = RuntimeTask(
+        task_id="t-web-1",
+        root_id="root-1",
+        agent_role="web_research_agent",
+        task_type="web_research",
+        objective="routine research",
+        symbol="SPY",
+        payload={"force_refresh": False},
+        available_at=datetime.now(timezone.utc),
+        idempotency_key="k1",
+    )
+    res1 = handlers.web_research(task_routine, deps={})
+    # Since materiality is low and force_refresh is False, decision should be SKIP
+    assert res1.get("skipped") is True
+    assert res1["execution_decision"]["kind"] == "skip"
+
+    # Task with explicit force_refresh=True
+    task_forced = RuntimeTask(
+        task_id="t-web-2",
+        root_id="root-2",
+        agent_role="web_research_agent",
+        task_type="web_research",
+        objective="forced research",
+        symbol="SPY",
+        payload={"force_refresh": True},
+        available_at=datetime.now(timezone.utc),
+        idempotency_key="k2",
+    )
+    # With force_refresh=True, evaluate returns AI kind
+    decision = handlers.gate.evaluate(
+        GateRequest(
+            task_type="web_research",
+            symbol="SPY",
+            force_refresh=True,
+        )
+    )
+    assert decision.kind == ExecutionKind.AI

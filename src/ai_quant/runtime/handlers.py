@@ -104,6 +104,7 @@ class ResearchRuntimeHandlers:
         if task.agent_role == "evidence_manager":
             return self.digest(task, deps)
 
+        force_refresh = bool(task.payload.get("force_refresh", False))
         gate_req = GateRequest(
             task_type="web_research",
             symbol=task.symbol,
@@ -116,7 +117,7 @@ class ResearchRuntimeHandlers:
             needs_web=True,
             needs_tools=True,
             run_id=task.root_id,
-            force_refresh=self.execute_ai,
+            force_refresh=force_refresh,
         )
         decision = self.gate.evaluate(gate_req)
 
@@ -167,6 +168,7 @@ class ResearchRuntimeHandlers:
             for claim in report.get("claims", []):
                 claims.append({"claim": claim.get("claim"), "verdict": claim.get("verdict")})
 
+        force_refresh = bool(task.payload.get("force_refresh", False))
         gate_req = GateRequest(
             task_type="contradiction",
             symbol=task.symbol,
@@ -178,7 +180,7 @@ class ResearchRuntimeHandlers:
             ambiguity=0.60,
             financial_impact=0.55,
             run_id=task.root_id,
-            force_refresh=self.execute_ai,
+            force_refresh=force_refresh,
         )
         decision = self.gate.evaluate(gate_req)
 

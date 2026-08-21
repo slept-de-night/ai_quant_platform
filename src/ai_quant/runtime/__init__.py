@@ -41,7 +41,8 @@ from .pit import PITObservation, PITStore
 from .clock import QuantClock, HistoricalClock, LiveClock
 from .facts import ResearchFact
 from .snapshot import QuantSnapshot, SnapshotResolver, ResearchSnapshot, ResearchSnapshotBuilder
-from .context import RuntimeMode, DecisionContext
+from .context import RuntimeMode, DecisionContext, CompiledResearchContext, ContextCompiler
+from .changeset import ChangeSet, ChangeItem, ChangeCategory
 from .strategy import StrategyProtocol, StrategyDecision
 from .quant_runtime import UnifiedQuantRuntime, RuntimeResult
 
@@ -84,6 +85,11 @@ __all__ = [
     "ResearchSnapshotBuilder",
     "RuntimeMode",
     "DecisionContext",
+    "CompiledResearchContext",
+    "ContextCompiler",
+    "ChangeSet",
+    "ChangeItem",
+    "ChangeCategory",
     "StrategyProtocol",
     "StrategyDecision",
     "UnifiedQuantRuntime",

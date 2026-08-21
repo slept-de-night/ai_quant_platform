@@ -43,6 +43,23 @@ func main() {
 	engine := oms.NewEngine(initialEquity, riskCfg)
 	gateway := market.NewGateway()
 
+	journalPath := os.Getenv("OMS_JOURNAL_PATH")
+	if journalPath == "" {
+		journalPath = "data/oms_journal.jsonl"
+	}
+	journal, err := oms.NewJournal(journalPath)
+	if err != nil {
+		log.Printf("[JOURNAL WARNING] Could not initialize journal %s: %v", journalPath, err)
+	} else {
+		engine.SetJournal(journal)
+		replayed, err := journal.Replay(engine)
+		if err != nil {
+			log.Printf("[JOURNAL REPLAY ERROR] Replay failed: %v. Engine frozen.", err)
+		} else if replayed > 0 {
+			log.Printf("[JOURNAL REPLAY] Successfully recovered %d events from %s", replayed, journalPath)
+		}
+	}
+
 	// Initialize Pluggable Broker Registry
 	brokerReg := broker.NewRegistry()
 	paperAdapter := broker.NewPaperAdapter("paper-simulation", initialEquity)

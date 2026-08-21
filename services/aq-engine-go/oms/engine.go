@@ -24,6 +24,7 @@ type Engine struct {
 	dailyOrders  int
 	lastResetDay string
 	isFrozen     bool
+	journal      *Journal
 }
 
 func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
@@ -50,11 +51,18 @@ func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
 	}
 }
 
+func (e *Engine) SetJournal(j *Journal) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.journal = j
+}
+
 func (e *Engine) Freeze() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.isFrozen = true
 	e.portfolio.IsFrozen = true
+	_ = e.journal.RecordEvent(EventEngineFrozen, nil, nil, "", "", "")
 }
 
 func (e *Engine) Unfreeze() {
@@ -62,6 +70,7 @@ func (e *Engine) Unfreeze() {
 	defer e.mu.Unlock()
 	e.isFrozen = false
 	e.portfolio.IsFrozen = false
+	_ = e.journal.RecordEvent(EventEngineUnfrozen, nil, nil, "", "", "")
 }
 
 func (e *Engine) IsFrozen() bool {
@@ -235,6 +244,7 @@ func (e *Engine) ApplyFill(fill models.Fill) (*models.Position, error) {
 		e.portfolio.PeakEquity = e.portfolio.Equity
 	}
 
+	_ = e.journal.RecordEvent(EventFillRecorded, nil, &fill, fill.ClientOrderID, fill.BrokerOrderID, "")
 	return &pos, nil
 }
 
@@ -246,14 +256,20 @@ func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status model
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	reasonStr := ""
+	if len(reasons) > 0 {
+		reasonStr = reasons[0]
+	}
+
 	if ord, exists := e.orderHistory[clientOrderID]; exists {
 		ord.Status = status
 		if brokerOrderID != "" {
 			ord.BrokerOrderID = brokerOrderID
 		}
-		if len(reasons) > 0 && reasons[0] != "" {
-			ord.Reason = reasons[0]
+		if reasonStr != "" {
+			ord.Reason = reasonStr
 		}
+		ord.UpdatedAt = time.Now().UTC()
 		e.orderHistory[clientOrderID] = ord
 		for i := range e.orderList {
 			if e.orderList[i].ClientOrderID == clientOrderID {
@@ -261,12 +277,22 @@ func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status model
 				if brokerOrderID != "" {
 					e.orderList[i].BrokerOrderID = brokerOrderID
 				}
-				if len(reasons) > 0 && reasons[0] != "" {
-					e.orderList[i].Reason = reasons[0]
+				if reasonStr != "" {
+					e.orderList[i].Reason = reasonStr
 				}
+				e.orderList[i].UpdatedAt = ord.UpdatedAt
 				break
 			}
 		}
+	}
+
+	switch status {
+	case models.OrderStatusAcknowledged:
+		_ = e.journal.RecordEvent(EventOrderAcknowledged, nil, nil, clientOrderID, brokerOrderID, reasonStr)
+	case models.OrderStatusSubmitFailed:
+		_ = e.journal.RecordEvent(EventOrderSubmitFailed, nil, nil, clientOrderID, brokerOrderID, reasonStr)
+	case models.OrderStatusCancelled:
+		_ = e.journal.RecordEvent(EventOrderCanceled, nil, nil, clientOrderID, brokerOrderID, reasonStr)
 	}
 }
 
@@ -419,16 +445,154 @@ func (e *Engine) ReserveOrder(order *models.OrderIntent) (*models.OrderIntent, m
 		ordCopy.CreatedAt = time.Now().UTC()
 	}
 	ordCopy.Status = models.OrderStatusSubmitting
+	ordCopy.UpdatedAt = ordCopy.CreatedAt
 
 	e.orderHistory[ordCopy.ClientOrderID] = ordCopy
 	e.orderList = append(e.orderList, ordCopy)
 	e.dailyOrders++
+
+	_ = e.journal.RecordEvent(EventOrderSubmitting, &ordCopy, nil, ordCopy.ClientOrderID, "", "")
 
 	return &ordCopy, models.RiskDecision{
 		Approved: true,
 		Order:    &ordCopy,
 		Reasons:  nil,
 		TraceID:  traceID,
+	}
+}
+
+func (e *Engine) replayEvent(evt JournalEvent) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	switch evt.Type {
+	case EventOrderReserved, EventOrderSubmitting:
+		if evt.Order != nil {
+			ord := *evt.Order
+			if ord.UpdatedAt.IsZero() {
+				ord.UpdatedAt = ord.CreatedAt
+			}
+			e.orderHistory[ord.ClientOrderID] = ord
+			e.orderList = append(e.orderList, ord)
+			e.dailyOrders++
+		}
+	case EventOrderAcknowledged:
+		if ord, ok := e.orderHistory[evt.ClientOrderID]; ok {
+			ord.Status = models.OrderStatusAcknowledged
+			if evt.BrokerOrderID != "" {
+				ord.BrokerOrderID = evt.BrokerOrderID
+			}
+			ord.UpdatedAt = evt.Timestamp
+			e.orderHistory[evt.ClientOrderID] = ord
+			for i := range e.orderList {
+				if e.orderList[i].ClientOrderID == evt.ClientOrderID {
+					e.orderList[i] = ord
+					break
+				}
+			}
+		}
+	case EventOrderSubmitFailed:
+		if ord, ok := e.orderHistory[evt.ClientOrderID]; ok {
+			ord.Status = models.OrderStatusSubmitFailed
+			ord.Reason = evt.Reason
+			ord.UpdatedAt = evt.Timestamp
+			e.orderHistory[evt.ClientOrderID] = ord
+			for i := range e.orderList {
+				if e.orderList[i].ClientOrderID == evt.ClientOrderID {
+					e.orderList[i] = ord
+					break
+				}
+			}
+		}
+	case EventOrderCanceled:
+		if ord, ok := e.orderHistory[evt.ClientOrderID]; ok {
+			ord.Status = models.OrderStatusCancelled
+			ord.UpdatedAt = evt.Timestamp
+			e.orderHistory[evt.ClientOrderID] = ord
+			for i := range e.orderList {
+				if e.orderList[i].ClientOrderID == evt.ClientOrderID {
+					e.orderList[i] = ord
+					break
+				}
+			}
+		}
+	case EventFillRecorded:
+		if evt.Fill != nil {
+			fill := *evt.Fill
+			if _, exists := e.fills[fill.FillID]; !exists {
+				e.fills[fill.FillID] = fill
+				e.fillList = append(e.fillList, fill)
+
+				if ord, exists := e.orderHistory[fill.ClientOrderID]; exists {
+					prevFilledQty := ord.FilledQtyFloat
+					prevCost := prevFilledQty * ord.AverageFillPrice
+					newFilledQty := prevFilledQty + fill.Qty
+					newCost := prevCost + (fill.Qty * fill.Price)
+
+					ord.FilledQty = int(newFilledQty)
+					ord.FilledQtyFloat = newFilledQty
+					if newFilledQty > 0 {
+						ord.AverageFillPrice = newCost / newFilledQty
+					}
+					if ord.BrokerOrderID == "" && fill.BrokerOrderID != "" {
+						ord.BrokerOrderID = fill.BrokerOrderID
+					}
+
+					targetQty := float64(ord.Qty)
+					if ord.RequestedQty > 0 {
+						targetQty = ord.RequestedQty
+					}
+
+					if newFilledQty >= targetQty {
+						ord.Status = models.OrderStatusFilled
+					} else if newFilledQty > 0 {
+						ord.Status = models.OrderStatusPartiallyFilled
+					}
+					ord.UpdatedAt = fill.Timestamp
+
+					e.orderHistory[fill.ClientOrderID] = ord
+					for i := range e.orderList {
+						if e.orderList[i].ClientOrderID == fill.ClientOrderID {
+							e.orderList[i] = ord
+							break
+						}
+					}
+				}
+
+				pos := e.positions[fill.Symbol]
+				pos.Symbol = fill.Symbol
+
+				if fill.Side == models.SideBuy {
+					pos.Qty += fill.Qty
+					pos.CostBasis += fill.Qty * fill.Price
+					pos.MarketValue = pos.Qty * fill.Price
+					e.portfolio.Cash -= fill.Qty * fill.Price
+				} else if fill.Side == models.SideSell {
+					pos.Qty -= fill.Qty
+					pos.MarketValue = pos.Qty * fill.Price
+					e.portfolio.Cash += fill.Qty * fill.Price
+				}
+				e.positions[fill.Symbol] = pos
+
+				var totalGross float64
+				var totalPosVal float64
+				for _, p := range e.positions {
+					totalGross += math.Abs(p.MarketValue)
+					totalPosVal += p.MarketValue
+				}
+				e.portfolio.GrossExposure = totalGross
+				e.portfolio.Equity = e.portfolio.Cash + totalPosVal
+				if e.portfolio.Equity > e.portfolio.PeakEquity {
+					e.portfolio.PeakEquity = e.portfolio.Equity
+				}
+			}
+		}
+	case EventEngineFrozen:
+		e.isFrozen = true
+		e.portfolio.IsFrozen = true
+	case EventEngineUnfrozen:
+		e.isFrozen = false
+		e.portfolio.IsFrozen = false
 	}
 }
 

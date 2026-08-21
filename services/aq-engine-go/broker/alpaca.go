@@ -2,11 +2,14 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"aq-engine-go/models"
@@ -44,6 +47,10 @@ func NewAlpacaAdapter(name, apiKey, secretKey string, isPaper bool) *AlpacaAdapt
 	}
 }
 
+func (c *AlpacaAdapter) SetBaseURL(u string) {
+	c.baseURL = u
+}
+
 func (c *AlpacaAdapter) Name() string {
 	return c.name
 }
@@ -53,7 +60,7 @@ func (c *AlpacaAdapter) Kind() BrokerKind {
 }
 
 func (c *AlpacaAdapter) Environment() Environment {
-	if c.baseURL == "https://paper-api.alpaca.markets" {
+	if strings.Contains(c.baseURL, "paper") || strings.Contains(c.baseURL, "127.0.0.1") || strings.Contains(c.baseURL, "localhost") {
 		return EnvPaper
 	}
 	return EnvLive
@@ -61,6 +68,48 @@ func (c *AlpacaAdapter) Environment() Environment {
 
 func (c *AlpacaAdapter) IsConfigured() bool {
 	return c.apiKey != "" && c.secretKey != ""
+}
+
+// doRequest is the centralized, sanitized HTTP execution engine for Alpaca REST endpoints.
+// It enforces timeouts, authentication headers, and safe error masking (no leaked credentials).
+func (c *AlpacaAdapter) doRequest(ctx context.Context, method, endpoint string, payload interface{}) ([]byte, int, error) {
+	var bodyReader io.Reader
+	if payload != nil {
+		reqBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to encode request payload: %w", err)
+		}
+		bodyReader = bytes.NewBuffer(reqBytes)
+	}
+
+	fullURL := c.baseURL + endpoint
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create http request: %w", err)
+	}
+
+	req.Header.Set("APCA-API-KEY-ID", c.apiKey)
+	req.Header.Set("APCA-API-SECRET-KEY", c.secretKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		// Clean error without exposing secret keys
+		return nil, 0, fmt.Errorf("alpaca request to %s failed: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return respBody, resp.StatusCode, fmt.Errorf("alpaca error (%d) on %s: %s", resp.StatusCode, endpoint, string(respBody))
+	}
+
+	return respBody, resp.StatusCode, nil
 }
 
 type alpacaOrderRequest struct {
@@ -73,59 +122,47 @@ type alpacaOrderRequest struct {
 }
 
 type alpacaOrderResponse struct {
-	ID            string `json:"id"`
-	ClientOrderID string `json:"client_order_id"`
-	Status        string `json:"status"`
-	Symbol        string `json:"symbol"`
-	Qty           string `json:"qty"`
-	Side          string `json:"side"`
+	ID             string  `json:"id"`
+	ClientOrderID  string  `json:"client_order_id"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	SubmittedAt    string  `json:"submitted_at"`
+	FilledAt       *string `json:"filled_at"`
+	Symbol         string  `json:"symbol"`
+	Qty            string  `json:"qty"`
+	FilledQty      string  `json:"filled_qty"`
+	Type           string  `json:"type"`
+	Side           string  `json:"side"`
+	TimeInForce    string  `json:"time_in_force"`
+	LimitPrice     *string `json:"limit_price"`
+	FilledAvgPrice *string `json:"filled_avg_price"`
+	Status         string  `json:"status"`
 }
 
-func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, error) {
-	if !c.IsConfigured() {
-		return c.localMock.SubmitOrder(order)
-	}
-
-	reqBody, err := json.Marshal(alpacaOrderRequest{
-		Symbol:        order.Symbol,
-		Qty:           order.Qty,
-		Side:          string(order.Side),
-		Type:          "market",
-		TimeInForce:   "day",
-		ClientOrderID: order.ClientOrderID,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", c.baseURL+"/v2/orders", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("APCA-API-KEY-ID", c.apiKey)
-	req.Header.Set("APCA-API-SECRET-KEY", c.secretKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("alpaca api error (%d): %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	var res alpacaOrderResponse
-	if err := json.Unmarshal(bodyBytes, &res); err != nil {
-		return nil, err
-	}
-
+func parseAlpacaOrder(res alpacaOrderResponse) BrokerOrder {
 	qtyInt, _ := strconv.Atoi(res.Qty)
-	now := time.Now().UTC()
-	return &BrokerOrder{
+	filledQtyInt, _ := strconv.Atoi(res.FilledQty)
+
+	var avgFillPrice float64
+	if res.FilledAvgPrice != nil {
+		avgFillPrice, _ = strconv.ParseFloat(*res.FilledAvgPrice, 64)
+	}
+
+	var limitPrice float64
+	if res.LimitPrice != nil {
+		limitPrice, _ = strconv.ParseFloat(*res.LimitPrice, 64)
+	}
+
+	createdAt, _ := time.Parse(time.RFC3339Nano, res.CreatedAt)
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	updatedAt, _ := time.Parse(time.RFC3339Nano, res.UpdatedAt)
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+
+	return BrokerOrder{
 		ID:               res.ID,
 		BrokerOrderID:    res.ID,
 		ClientOrderID:    res.ClientOrderID,
@@ -133,51 +170,213 @@ func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, er
 		Side:             res.Side,
 		Qty:              qtyInt,
 		RequestedQty:     float64(qtyInt),
-		FilledQty:        0,
-		FilledQtyFloat:   0,
+		FilledQty:        filledQtyInt,
+		FilledQtyFloat:   float64(filledQtyInt),
 		Status:           NormalizeBrokerStatus(res.Status),
 		RawStatus:        res.Status,
-		LimitPrice:       order.ReferencePrice,
-		AvgPrice:         order.ReferencePrice,
-		AverageFillPrice: order.ReferencePrice,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}, nil
+		LimitPrice:       limitPrice,
+		AvgPrice:         avgFillPrice,
+		AverageFillPrice: avgFillPrice,
+		CreatedAt:        createdAt,
+		UpdatedAt:        updatedAt,
+	}
+}
+
+func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, error) {
+	if !c.IsConfigured() {
+		return c.localMock.SubmitOrder(order)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	payload := alpacaOrderRequest{
+		Symbol:        order.Symbol,
+		Qty:           order.Qty,
+		Side:          string(order.Side),
+		Type:          "market",
+		TimeInForce:   "day",
+		ClientOrderID: order.ClientOrderID,
+	}
+
+	bodyBytes, _, err := c.doRequest(ctx, "POST", "/v2/orders", payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var res alpacaOrderResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse alpaca order response: %w", err)
+	}
+
+	bo := parseAlpacaOrder(res)
+	if bo.LimitPrice == 0 {
+		bo.LimitPrice = order.ReferencePrice
+	}
+	return &bo, nil
 }
 
 func (c *AlpacaAdapter) CancelOrder(clientOrderID string) error {
 	if !c.IsConfigured() {
 		return c.localMock.CancelOrder(clientOrderID)
 	}
-	return nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	endpoint := fmt.Sprintf("/v2/orders:by_client_order_id?client_order_id=%s", url.QueryEscape(clientOrderID))
+	_, _, err := c.doRequest(ctx, "DELETE", endpoint, nil)
+	return err
 }
 
 func (c *AlpacaAdapter) GetOrder(clientOrderID string) (*BrokerOrder, error) {
 	if !c.IsConfigured() {
 		return c.localMock.GetOrder(clientOrderID)
 	}
-	return nil, fmt.Errorf("alpaca get order not implemented for live")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	endpoint := fmt.Sprintf("/v2/orders:by_client_order_id?client_order_id=%s", url.QueryEscape(clientOrderID))
+	bodyBytes, _, err := c.doRequest(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var res alpacaOrderResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse alpaca order response: %w", err)
+	}
+
+	bo := parseAlpacaOrder(res)
+	return &bo, nil
+}
+
+func (c *AlpacaAdapter) GetOrderByBrokerID(brokerOrderID string) (*BrokerOrder, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("broker not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	endpoint := fmt.Sprintf("/v2/orders/%s", url.PathEscape(brokerOrderID))
+	bodyBytes, _, err := c.doRequest(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var res alpacaOrderResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse alpaca order response: %w", err)
+	}
+
+	bo := parseAlpacaOrder(res)
+	return &bo, nil
 }
 
 func (c *AlpacaAdapter) ListOrders() ([]BrokerOrder, error) {
 	if !c.IsConfigured() {
 		return c.localMock.ListOrders()
 	}
-	return []BrokerOrder{}, nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bodyBytes, _, err := c.doRequest(ctx, "GET", "/v2/orders?status=all&limit=100", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resList []alpacaOrderResponse
+	if err := json.Unmarshal(bodyBytes, &resList); err != nil {
+		return nil, fmt.Errorf("failed to parse alpaca order list: %w", err)
+	}
+
+	orders := make([]BrokerOrder, len(resList))
+	for i, res := range resList {
+		orders[i] = parseAlpacaOrder(res)
+	}
+	return orders, nil
+}
+
+type alpacaPositionResponse struct {
+	Symbol       string `json:"symbol"`
+	Qty          string `json:"qty"`
+	MarketValue  string `json:"market_value"`
+	CostBasis    string `json:"cost_basis"`
+	CurrentPrice string `json:"current_price"`
 }
 
 func (c *AlpacaAdapter) ListPositions() ([]BrokerPosition, error) {
 	if !c.IsConfigured() {
 		return c.localMock.ListPositions()
 	}
-	return []BrokerPosition{}, nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bodyBytes, _, err := c.doRequest(ctx, "GET", "/v2/positions", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resList []alpacaPositionResponse
+	if err := json.Unmarshal(bodyBytes, &resList); err != nil {
+		return nil, fmt.Errorf("failed to parse alpaca positions: %w", err)
+	}
+
+	positions := make([]BrokerPosition, len(resList))
+	for i, pos := range resList {
+		qty, _ := strconv.ParseFloat(pos.Qty, 64)
+		mv, _ := strconv.ParseFloat(pos.MarketValue, 64)
+		cb, _ := strconv.ParseFloat(pos.CostBasis, 64)
+		positions[i] = BrokerPosition{
+			Symbol:      pos.Symbol,
+			Qty:         qty,
+			MarketValue: mv,
+			CostBasis:   cb,
+		}
+	}
+	return positions, nil
+}
+
+type alpacaAccountResponse struct {
+	Cash        string `json:"cash"`
+	Equity      string `json:"equity"`
+	BuyingPower string `json:"buying_power"`
+	Currency    string `json:"currency"`
+	Status      string `json:"status"`
 }
 
 func (c *AlpacaAdapter) GetAccountState() (*AccountState, error) {
 	if !c.IsConfigured() {
 		return c.localMock.GetAccountState()
 	}
-	return &AccountState{Cash: 100000.0, Equity: 100000.0, BuyingPower: 200000.0, Currency: "USD"}, nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bodyBytes, _, err := c.doRequest(ctx, "GET", "/v2/account", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var res alpacaAccountResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse alpaca account: %w", err)
+	}
+
+	cash, _ := strconv.ParseFloat(res.Cash, 64)
+	equity, _ := strconv.ParseFloat(res.Equity, 64)
+	buyingPower, _ := strconv.ParseFloat(res.BuyingPower, 64)
+
+	return &AccountState{
+		Cash:        cash,
+		Equity:      equity,
+		BuyingPower: buyingPower,
+		Currency:    res.Currency,
+	}, nil
 }
 
 func (c *AlpacaAdapter) GetHealth() Health {
@@ -201,13 +400,53 @@ func (c *AlpacaAdapter) GetBrokerSnapshot() (*reconciliation.BrokerState, error)
 	if !c.IsConfigured() {
 		return c.localMock.GetBrokerSnapshot()
 	}
+
+	orders, err := c.ListOrders()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list broker orders for snapshot: %w", err)
+	}
+
+	positions, err := c.ListPositions()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list broker positions for snapshot: %w", err)
+	}
+
+	acct, err := c.GetAccountState()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get broker account state for snapshot: %w", err)
+	}
+
 	now := time.Now().UTC()
+	reconOrders := make(map[string]reconciliation.OrderState)
+	for _, ord := range orders {
+		reconOrders[ord.ClientOrderID] = reconciliation.OrderState{
+			ClientOrderID: ord.ClientOrderID,
+			BrokerOrderID: ord.BrokerOrderID,
+			Symbol:        ord.Symbol,
+			Side:          ord.Side,
+			RequestedQty:  ord.Qty,
+			FilledQty:     ord.FilledQty,
+			Status:        string(ord.Status),
+			CreatedAt:     ord.CreatedAt,
+			UpdatedAt:     ord.UpdatedAt,
+		}
+	}
+
+	reconPositions := make(map[string]reconciliation.PositionState)
+	for _, pos := range positions {
+		reconPositions[pos.Symbol] = reconciliation.PositionState{
+			Symbol:      pos.Symbol,
+			Qty:         pos.Qty,
+			MarketValue: pos.MarketValue,
+			CostBasis:   pos.CostBasis,
+		}
+	}
+
 	return &reconciliation.BrokerState{
-		Orders:    make(map[string]reconciliation.OrderState),
-		Positions: make(map[string]reconciliation.PositionState),
-		Cash:      100000.0,
-		Equity:    100000.0,
+		Orders:    reconOrders,
+		Positions: reconPositions,
+		Cash:      acct.Cash,
+		Equity:    acct.Equity,
 		Timestamp: now,
 	}, nil
 }
-

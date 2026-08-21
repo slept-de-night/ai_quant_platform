@@ -429,3 +429,103 @@ func TestReadOnlyReconciliationAndRiskOperationsAvailableWhileFrozen(t *testing.
 		t.Fatalf("Reconciliation failed unexpectedly: %v", diff.Discrepancies)
 	}
 }
+
+// 9. Test: concurrent duplicate submissions invoke broker exactly once
+func TestConcurrentDuplicateSubmissionsInvokeBrokerExactlyOnce(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	mb := newMockBroker(false, nil)
+
+	order := &models.OrderIntent{
+		Symbol:         "QQQ",
+		Side:           models.SideBuy,
+		Qty:            5,
+		ReferencePrice: 450.0,
+		Notional:       2250.0,
+		ClientOrderID:  "concurrent-idem-1",
+		TraceID:        "trace-concurrent-1",
+	}
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successCount := 0
+	failCount := 0
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, dec, err := engine.Submit(order, mb)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil && dec.Approved {
+				successCount++
+			} else {
+				failCount++
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Exactly 1 submission must succeed
+	if successCount != 1 {
+		t.Fatalf("Expected exactly 1 successful submission, got %d", successCount)
+	}
+	if failCount != goroutines-1 {
+		t.Fatalf("Expected %d failed duplicate submissions, got %d", goroutines-1, failCount)
+	}
+
+	// Broker must be called exactly once
+	if mb.GetSubmitCalls() != 1 {
+		t.Fatalf("Expected broker to be called exactly 1 time, got %d", mb.GetSubmitCalls())
+	}
+
+	// Engine history must contain exactly 1 order
+	history := engine.GetOrderHistory()
+	if len(history) != 1 {
+		t.Fatalf("Expected 1 order in history, got %d", len(history))
+	}
+	if history[0].Status != models.OrderStatusAcknowledged {
+		t.Fatalf("Expected status %s, got %s", models.OrderStatusAcknowledged, history[0].Status)
+	}
+}
+
+// 10. Test: successful submit stores broker order ID in order history
+func TestSuccessfulSubmitStoresBrokerOrderID(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	mb := newMockBroker(false, nil)
+
+	order := &models.OrderIntent{
+		Symbol:         "META",
+		Side:           models.SideBuy,
+		Qty:            8,
+		ReferencePrice: 500.0,
+		Notional:       4000.0,
+		ClientOrderID:  "broker-id-test-1",
+		TraceID:        "trace-broker-id-1",
+	}
+
+	bo, dec, err := engine.Submit(order, mb)
+	if err != nil || !dec.Approved {
+		t.Fatalf("Expected submit to succeed, got: %v", err)
+	}
+	if bo == nil || bo.ID == "" {
+		t.Fatalf("Expected valid broker order response with ID")
+	}
+
+	// Check that engine history records the broker order ID
+	ord, exists := engine.GetOrderByClientID("broker-id-test-1")
+	if !exists {
+		t.Fatalf("Order not found in history")
+	}
+	if ord.BrokerOrderID != bo.ID {
+		t.Fatalf("Expected BrokerOrderID '%s', got '%s'", bo.ID, ord.BrokerOrderID)
+	}
+	if ord.Status != models.OrderStatusAcknowledged {
+		t.Fatalf("Expected status ACKNOWLEDGED, got %s", ord.Status)
+	}
+}
+

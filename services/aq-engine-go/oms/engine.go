@@ -91,11 +91,18 @@ func (e *Engine) GetOrderByClientID(clientOrderID string) (models.OrderIntent, b
 }
 
 func (e *Engine) UpdateOrderStatus(clientOrderID string, status models.OrderStatus, reasons ...string) {
+	e.UpdateOrderStatusAndBrokerID(clientOrderID, status, "", reasons...)
+}
+
+func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status models.OrderStatus, brokerOrderID string, reasons ...string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if ord, exists := e.orderHistory[clientOrderID]; exists {
 		ord.Status = status
+		if brokerOrderID != "" {
+			ord.BrokerOrderID = brokerOrderID
+		}
 		if len(reasons) > 0 && reasons[0] != "" {
 			ord.Reason = reasons[0]
 		}
@@ -103,6 +110,9 @@ func (e *Engine) UpdateOrderStatus(clientOrderID string, status models.OrderStat
 		for i := range e.orderList {
 			if e.orderList[i].ClientOrderID == clientOrderID {
 				e.orderList[i].Status = status
+				if brokerOrderID != "" {
+					e.orderList[i].BrokerOrderID = brokerOrderID
+				}
 				if len(reasons) > 0 && reasons[0] != "" {
 					e.orderList[i].Reason = reasons[0]
 				}
@@ -292,6 +302,10 @@ func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*bro
 		return nil, decision, err
 	}
 
-	e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusAcknowledged)
+	brokerOrderID := ""
+	if resp != nil {
+		brokerOrderID = resp.ID
+	}
+	e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, models.OrderStatusAcknowledged, brokerOrderID)
 	return resp, decision, nil
 }

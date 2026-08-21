@@ -13,15 +13,21 @@ const (
 type OrderStatus string
 
 const (
-	OrderStatusPending      OrderStatus = "PENDING"
-	OrderStatusApproved     OrderStatus = "APPROVED"
-	OrderStatusRejected     OrderStatus = "REJECTED"
-	OrderStatusSubmitting   OrderStatus = "SUBMITTING"
-	OrderStatusSubmitted    OrderStatus = "SUBMITTED"
-	OrderStatusAcknowledged OrderStatus = "ACKNOWLEDGED"
-	OrderStatusFilled       OrderStatus = "FILLED"
-	OrderStatusCancelled    OrderStatus = "CANCELLED"
-	OrderStatusSubmitFailed OrderStatus = "SUBMIT_FAILED"
+	OrderStatusCreated                OrderStatus = "CREATED"
+	OrderStatusRiskApproved           OrderStatus = "RISK_APPROVED"
+	OrderStatusPending                OrderStatus = "PENDING"
+	OrderStatusApproved               OrderStatus = "APPROVED"
+	OrderStatusRejected               OrderStatus = "REJECTED"
+	OrderStatusSubmitting             OrderStatus = "SUBMITTING"
+	OrderStatusSubmitted              OrderStatus = "SUBMITTED"
+	OrderStatusAcknowledged           OrderStatus = "ACKNOWLEDGED"
+	OrderStatusPartiallyFilled        OrderStatus = "PARTIALLY_FILLED"
+	OrderStatusFilled                 OrderStatus = "FILLED"
+	OrderStatusCancelPending          OrderStatus = "CANCEL_PENDING"
+	OrderStatusCancelled              OrderStatus = "CANCELLED"
+	OrderStatusSubmitFailed           OrderStatus = "SUBMIT_FAILED"
+	OrderStatusExpired                OrderStatus = "EXPIRED"
+	OrderStatusReconciliationRequired OrderStatus = "RECONCILIATION_REQUIRED"
 )
 
 type OrderIntent struct {
@@ -32,6 +38,7 @@ type OrderIntent struct {
 	ReferencePrice  float64     `json:"reference_price"`
 	Notional        float64     `json:"notional"`
 	ClientOrderID   string      `json:"client_order_id"`
+	BrokerOrderID   string      `json:"broker_order_id,omitempty"`
 	TraceID         string      `json:"trace_id,omitempty"`
 	RunID           string      `json:"run_id,omitempty"`
 	DecisionID      string      `json:"decision_id,omitempty"`

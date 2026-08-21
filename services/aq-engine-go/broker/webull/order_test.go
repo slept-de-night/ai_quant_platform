@@ -13,7 +13,7 @@ import (
 // TestSubmitSandboxOrder_Success verifies sandbox order submission and normalization.
 func TestSubmitSandboxOrder_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/trade/order/place" {
+		if r.URL.Path != "/trading/orders/place" {
 			http.NotFound(w, r)
 			return
 		}
@@ -97,7 +97,7 @@ func TestSubmitOrder_LiveEnvironmentBlocked(t *testing.T) {
 // TestCancelSandboxOrder_Success verifies sandbox order cancellation.
 func TestCancelSandboxOrder_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/trade/order/cancel" {
+		if r.URL.Path != "/trading/orders/cancel" {
 			http.NotFound(w, r)
 			return
 		}

@@ -13,17 +13,26 @@ import (
 // TestFetchAccount_ParsesNormalizedState verifies JSON response deserialization and float conversion.
 func TestFetchAccount_ParsesNormalizedState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/trade/account/detail" {
+		if r.URL.Path != "/trading/assets/balances/get" {
 			http.NotFound(w, r)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{
-			"account_id": "acc_test_99",
-			"cash_balance": "125000.50",
-			"total_equity": "150000.75",
-			"buying_power": "200000.00",
-			"currency": "USD"
+			"total_asset_currency": "USD",
+			"total_cash_balance": "125000.50",
+			"total_market_value": "25000.25",
+			"total_unrealized_profit_loss": "3000.45",
+			"total_net_liquidation_value": "150000.75",
+			"total_day_profit_loss": "120.10",
+			"account_currency_assets": [
+				{
+					"currency": "USD",
+					"cash_balance": "125000.50",
+					"buying_power": "200000.00",
+					"net_liquidation_value": "150000.75"
+				}
+			]
 		}`))
 	}))
 	defer server.Close()
@@ -62,7 +71,7 @@ func TestFetchAccount_ParsesNormalizedState(t *testing.T) {
 // TestFetchPositions_ParsesMultiplePositions verifies multi-symbol position parsing.
 func TestFetchPositions_ParsesMultiplePositions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/trade/account/positions" {
+		if r.URL.Path != "/trading/assets/positions/list" {
 			http.NotFound(w, r)
 			return
 		}
@@ -117,7 +126,7 @@ func TestFetchPositions_ParsesMultiplePositions(t *testing.T) {
 // TestFetchOrders_NormalizesStatusAndDetails verifies orders deserialization and status normalization.
 func TestFetchOrders_NormalizesStatusAndDetails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/trade/order/list" {
+		if r.URL.Path != "/trading/orders/open-orders/list" {
 			http.NotFound(w, r)
 			return
 		}
@@ -185,13 +194,13 @@ func TestFetchOrders_NormalizesStatusAndDetails(t *testing.T) {
 func TestFetchBrokerSnapshot_ConstructsReconciliationBrokerState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/trade/account/detail":
+		case "/trading/assets/balances/get":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"account_id":"acc_99","cash_balance":"100000.00","total_equity":"120000.00","currency":"USD"}`))
-		case "/api/v1/trade/account/positions":
+			w.Write([]byte(`{"total_asset_currency":"USD","total_cash_balance":"100000.00","total_market_value":"20000.00","total_net_liquidation_value":"120000.00","account_currency_assets":[{"currency":"USD","cash_balance":"100000.00","buying_power":"130000.00"}]}`))
+		case "/trading/assets/positions/list":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`[{"symbol":"MSFT","quantity":"50","market_value":"20000.00","cost_basis":"18000.00"}]`))
-		case "/api/v1/trade/order/list":
+		case "/trading/orders/open-orders/list":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`[{"order_id":"ord_1","client_order_id":"c1","symbol":"MSFT","side":"BUY","total_quantity":"50","filled_quantity":"50","avg_price":"360.0","status":"FILLED"}]`))
 		default:
@@ -232,9 +241,9 @@ func TestFetchBrokerSnapshot_ConstructsReconciliationBrokerState(t *testing.T) {
 func TestAdapter_ContractAndQuarantine(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/trade/account/detail":
+		case "/trading/assets/balances/get":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"account_id":"acc_99","cash_balance":"50000.00","total_equity":"50000.00","currency":"USD"}`))
+			w.Write([]byte(`{"total_asset_currency":"USD","total_cash_balance":"50000.00","total_net_liquidation_value":"50000.00","account_currency_assets":[{"currency":"USD","cash_balance":"50000.00","buying_power":"60000.00"}]}`))
 		default:
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`[]`))

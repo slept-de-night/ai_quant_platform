@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/url"
+	"strconv"
 	"time"
 
 	"aq-engine-go/market"
@@ -30,12 +30,19 @@ type WebullQuote struct {
 }
 
 type rawQuoteResponse struct {
-	Symbol     string `json:"symbol"`
-	Bid        string `json:"bid"`
-	Ask        string `json:"ask"`
-	Last       string `json:"last"`
-	Volume     string `json:"volume"`
-	QuoteTime  string `json:"quote_time"`
+	Symbol        string `json:"symbol"`
+	LastTradeTime string `json:"last_trade_time"`
+	Price         string `json:"price"`
+	Bid           string `json:"bid"`
+	Ask           string `json:"ask"`
+	BidSize       string `json:"bid_size"`
+	AskSize       string `json:"ask_size"`
+	Volume        string `json:"volume"`
+}
+
+type rawSnapshotRequest struct {
+	Symbols  []string `json:"symbols"`
+	Category string   `json:"category"`
 }
 
 // FetchQuote queries the Webull OpenAPI quote endpoint for a symbol.
@@ -50,29 +57,47 @@ func FetchQuote(ctx context.Context, client *Client, symbol string, maxStaleness
 		maxStaleness = 60 * time.Second
 	}
 
-	query := url.Values{}
-	query.Set("symbol", symbol)
-
-	code, body, err := client.Execute(ctx, "GET", "/api/v1/market/quote", query, nil)
+	req := rawSnapshotRequest{Symbols: []string{symbol}, Category: "US_STOCK"}
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal snapshot request: %w", err)
+	}
+	code, body, err := client.Execute(ctx, "POST", EndpointMarketSnapshots, nil, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch quote for %s (HTTP %d): %w", symbol, code, err)
 	}
 
-	var raw rawQuoteResponse
-	if err := json.Unmarshal(body, &raw); err != nil {
+	var rawItems []rawQuoteResponse
+	if err := json.Unmarshal(body, &rawItems); err != nil {
 		return nil, fmt.Errorf("failed to parse quote JSON: %w", err)
+	}
+
+	var raw rawQuoteResponse
+	found := false
+	for _, item := range rawItems {
+		if item.Symbol == symbol {
+			raw = item
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: symbol %s absent from snapshot list", ErrInvalidQuote, symbol)
 	}
 
 	bid := parseFloatSafe(raw.Bid)
 	ask := parseFloatSafe(raw.Ask)
-	last := parseFloatSafe(raw.Last)
+	last := parseFloatSafe(raw.Price)
 	vol := parseFloatSafe(raw.Volume)
 
-	ts := time.Now().UTC()
-	if raw.QuoteTime != "" {
-		if t, err := time.Parse(time.RFC3339, raw.QuoteTime); err == nil {
-			ts = t
+	// Webull snapshot timestamps are milliseconds since Unix epoch; never fall back to local time.
+	ts := time.UnixMilli(0)
+	if raw.LastTradeTime != "" {
+		t, err := strconv.Atoi(raw.LastTradeTime)
+		if err != nil || t <= 0 {
+			return nil, fmt.Errorf("malformed authoritative quote timestamp for %s: %q", symbol, raw.LastTradeTime)
 		}
+		ts = time.UnixMilli(int64(t))
 	}
 
 	// Staleness validation

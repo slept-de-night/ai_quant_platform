@@ -13,13 +13,29 @@ import (
 )
 
 // Webull raw JSON response schemas
+//
+// These reflect the CURRENT official Webull Trading API contract. Account
+// balances are exposed via a top-level summary plus per-currency asset arrays.
+
+type WebullAccountCurrencyAsset struct {
+	Currency             string `json:"currency"`
+	CashBalance          string `json:"cash_balance"`
+	BuyingPower          string `json:"buying_power"`
+	DayBuyingPower       string `json:"day_buying_power"`
+	OvernightBuyingPower string `json:"overnight_buying_power"`
+	DayProfitLoss        string `json:"day_profit_loss"`
+	NetLiquidationValue  string `json:"net_liquidation_value"`
+}
 
 type WebullAccountResponse struct {
-	AccountID   string  `json:"account_id"`
-	CashBalance string  `json:"cash_balance"`
-	TotalEquity string  `json:"total_equity"`
-	BuyingPower string  `json:"buying_power"`
-	Currency    string  `json:"currency"`
+	TotalAssetCurrency        string                        `json:"total_asset_currency"`
+	TotalCurrencyBalance      string                        `json:"total_currency_balance"`
+	TotalCashBalance          string                        `json:"total_cash_balance"`
+	TotalMarketValue          string                        `json:"total_market_value"`
+	TotalUnrealizedProfitLoss string                        `json:"total_unrealized_profit_loss"`
+	TotalNetLiquidationValue  string                        `json:"total_net_liquidation_value"`
+	TotalDayProfitLoss        string                        `json:"total_day_profit_loss"`
+	AccountCurrencyAssets     []WebullAccountCurrencyAsset  `json:"account_currency_assets"`
 }
 
 type WebullPositionItem struct {
@@ -67,7 +83,7 @@ func FetchAccount(ctx context.Context, client *Client, accountID string) (*broke
 		query.Set("account_id", accountID)
 	}
 
-	code, body, err := client.Execute(ctx, "GET", "/api/v1/trade/account/detail", query, nil)
+	code, body, err := client.Execute(ctx, "GET", EndpointBalanceGet, query, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch webull account (HTTP %d): %w", code, err)
 	}
@@ -77,12 +93,19 @@ func FetchAccount(ctx context.Context, client *Client, accountID string) (*broke
 		return nil, fmt.Errorf("failed to parse webull account response: %w", err)
 	}
 
-	cash := parseFloatSafe(raw.CashBalance)
-	equity := parseFloatSafe(raw.TotalEquity)
-	bp := parseFloatSafe(raw.BuyingPower)
-	curr := raw.Currency
+	cash := parseFloatSafe(raw.TotalCashBalance)
+	equity := parseFloatSafe(raw.TotalNetLiquidationValue)
+	curr := raw.TotalAssetCurrency
 	if curr == "" {
 		curr = "USD"
+	}
+
+	bp := 0.0
+	for _, asset := range raw.AccountCurrencyAssets {
+		if asset.Currency == "" || asset.Currency == curr {
+			bp = parseFloatSafe(asset.BuyingPower)
+			break
+		}
 	}
 
 	return &broker.AccountState{
@@ -104,7 +127,7 @@ func FetchPositions(ctx context.Context, client *Client, accountID string) ([]br
 		query.Set("account_id", accountID)
 	}
 
-	code, body, err := client.Execute(ctx, "GET", "/api/v1/trade/account/positions", query, nil)
+	code, body, err := client.Execute(ctx, "GET", EndpointPositionsList, query, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch webull positions (HTTP %d): %w", code, err)
 	}
@@ -142,7 +165,7 @@ func FetchOrders(ctx context.Context, client *Client, accountID string) ([]broke
 		query.Set("account_id", accountID)
 	}
 
-	code, body, err := client.Execute(ctx, "GET", "/api/v1/trade/order/list", query, nil)
+	code, body, err := client.Execute(ctx, "GET", EndpointOpenOrdersList, query, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch webull orders (HTTP %d): %w", code, err)
 	}

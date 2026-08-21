@@ -3,6 +3,7 @@ package webull
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,16 +15,21 @@ import (
 // TestFetchQuote_ParsesValidQuote verifies quote parsing and deserialization.
 func TestFetchQuote_ParsesValidQuote(t *testing.T) {
 	now := time.Now().UTC()
+	freshMs := int64(now.Unix()) * 1000
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/market-data/stocks/snapshots/list" {
+			http.NotFound(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		w.Write([]byte(`[{
 			"symbol": "AAPL",
-			"bid": "150.10",
+			"price": "150.15",
 			"ask": "150.20",
-			"last": "150.15",
+			"bid": "150.10",
 			"volume": "500000",
-			"quote_time": "` + now.Format(time.RFC3339) + `"
-		}`))
+			"last_trade_time": "` + fmt.Sprintf("%d", freshMs) + `"
+		}]`))
 	}))
 	defer server.Close()
 
@@ -50,16 +56,22 @@ func TestFetchQuote_ParsesValidQuote(t *testing.T) {
 
 // TestFetchQuote_StaleQuoteRejected verifies that stale quotes older than threshold fail closed.
 func TestFetchQuote_StaleQuoteRejected(t *testing.T) {
-	staleTime := time.Now().UTC().Add(-5 * time.Minute)
+	stale := time.Now().UTC().Add(-5 * time.Minute)
+	staleMs := int64(stale.Unix()) * 1000
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/market-data/stocks/snapshots/list" {
+			http.NotFound(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		w.Write([]byte(`[{
 			"symbol": "AAPL",
-			"bid": "150.10",
+			"price": "150.15",
 			"ask": "150.20",
-			"last": "150.15",
-			"quote_time": "` + staleTime.Format(time.RFC3339) + `"
-		}`))
+			"bid": "150.10",
+			"volume": "500000",
+			"last_trade_time": "` + fmt.Sprintf("%d", staleMs) + `"
+		}]`))
 	}))
 	defer server.Close()
 

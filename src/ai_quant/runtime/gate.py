@@ -74,6 +74,16 @@ CREATE TABLE IF NOT EXISTS execution_gate_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_gate_run_id ON execution_gate_decisions(run_id);
 CREATE INDEX IF NOT EXISTS idx_gate_kind ON execution_gate_decisions(kind);
+CREATE TABLE IF NOT EXISTS cached_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_key TEXT NOT NULL UNIQUE,
+    task_type TEXT,
+    symbol TEXT,
+    context_hash TEXT,
+    result_ref TEXT,
+    stored_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cached_cache_key ON cached_results(cache_key);
 """
 
 DETERMINISTIC_TASK_TYPES = {
@@ -150,12 +160,13 @@ class AIExecutionGate:
             self.record(req, decision)
             return decision
 
-        # 2. Exact Cache Hit Check
-        if req.cache_key and not req.force_refresh:
-            # When cache_key is provided and matched upstream
+        # 2. Exact Cache Hit Requires Verified Stored Evidence
+        # A supplied cache_key is NOT proof that a valid cached result exists.
+        # Only emit CACHE when the registry holds an actual stored result.
+        if req.cache_key and not req.force_refresh and self.has_verified_cache(req.cache_key, req.symbol, req.context_hash):
             decision = ExecutionDecision(
                 kind=ExecutionKind.CACHE,
-                reason=f"Exact cached reasoning output available for cache_key={req.cache_key}.",
+                reason=f"Verified cached reasoning output available for cache_key={req.cache_key}.",
                 materiality=materiality,
                 cache_key=req.cache_key,
                 freshness_required=False,
@@ -311,6 +322,61 @@ class AIExecutionGate:
             run_id=req.run_id,
         )
         return self.router.decide(route_req)
+
+    def register_cached_result(
+        self,
+        cache_key: str,
+        task_type: Optional[str] = None,
+        symbol: Optional[str] = None,
+        context_hash: Optional[str] = None,
+        result_ref: Optional[str] = None,
+    ) -> None:
+        """Record that a real, stored reasoning result exists under ``cache_key``.
+
+        Only after this has been called does ``evaluate`` consider the key a
+        verified cache hit. This prevents a bare ``cache_key`` field from being
+        treated as proof of an actual cached result.
+        """
+        with sqlite3.connect(self.cfg.db_path) as con:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO cached_results(
+                    cache_key, task_type, symbol, context_hash, result_ref, stored_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cache_key,
+                    task_type,
+                    symbol.upper() if symbol else None,
+                    context_hash,
+                    result_ref,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def has_verified_cache(
+        self,
+        cache_key: str,
+        symbol: Optional[str] = None,
+        context_hash: Optional[str] = None,
+    ) -> bool:
+        """True only when a stored result is on record for this cache_key.
+
+        When a symbol/context_hash is supplied they are required to match, so a
+        stale key from a different context cannot be treated as a valid hit.
+        """
+        with sqlite3.connect(self.cfg.db_path) as con:
+            row = con.execute(
+                """
+                SELECT 1 FROM cached_results
+                WHERE cache_key = ?
+                  AND (? IS NULL OR symbol = ?)
+                  AND (? IS NULL OR context_hash = ?)
+                LIMIT 1
+                """,
+                (cache_key, symbol, symbol.upper() if symbol else None, context_hash, context_hash),
+            ).fetchone()
+        return row is not None
 
     def record(self, req: GateRequest, decision: ExecutionDecision) -> None:
         with sqlite3.connect(self.cfg.db_path) as con:

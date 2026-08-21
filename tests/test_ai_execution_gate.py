@@ -47,10 +47,10 @@ def test_deterministic_tasks_never_invoke_ai(test_cfg):
         assert "deterministic" in decision.reason.lower()
 
 
-def test_exact_cache_hit(test_cfg):
+def test_exact_cache_hit_requires_verified_result(test_cfg):
     gate = AIExecutionGate(test_cfg)
-    
-    # With cache key present and force_refresh=False
+
+    # A bare cache_key is NOT proof of a cached result -> must NOT be CACHE.
     req = GateRequest(
         task_type="web_research",
         symbol="NVDA",
@@ -58,11 +58,23 @@ def test_exact_cache_hit(test_cfg):
         force_refresh=False,
     )
     decision = gate.evaluate(req)
-    assert decision.kind == ExecutionKind.CACHE
-    assert decision.cache_key == "sha256:abc123456789"
+    assert decision.kind != ExecutionKind.CACHE
+    assert decision.kind == ExecutionKind.SKIP
     assert decision.model_route is None
 
-    # When force_refresh=True, bypasses cache
+    # After a stored result is registered, the same cache_key is a verified hit.
+    gate.register_cached_result(
+        cache_key="sha256:abc123456789",
+        task_type="web_research",
+        symbol="NVDA",
+        context_hash=req.context_hash,
+    )
+    decision2 = gate.evaluate(req)
+    assert decision2.kind == ExecutionKind.CACHE
+    assert decision2.cache_key == "sha256:abc123456789"
+    assert decision2.model_route is None
+
+    # force_refresh=True must bypass even a verified cache.
     req_force = GateRequest(
         task_type="web_research",
         symbol="NVDA",
@@ -169,6 +181,9 @@ def test_scenario_falsification_materiality_gating(test_cfg):
 def test_gate_audit_logging_and_summary_stats(test_cfg):
     gate = AIExecutionGate(test_cfg)
     run_id = "run-test-001"
+
+    # Register a verified cached result so the cache_key below is a real hit.
+    gate.register_cached_result(cache_key="k1", task_type="web_research", symbol="SPY")
 
     # Evaluate multiple different requests
     gate.evaluate(GateRequest(task_type="extract", symbol="SPY", run_id=run_id))

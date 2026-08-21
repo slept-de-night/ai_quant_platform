@@ -119,6 +119,14 @@ func (r *Reconciler) RecordRun(brokerName string, diff Diff) {
 	r.LastBroker = brokerName
 }
 
+func (r *Reconciler) Invalidate() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.LastRunAt = nil
+	r.LastDiff = nil
+	r.LastBroker = ""
+}
+
 func (r *Reconciler) GetSummary(now time.Time) (status string, isFresh bool, lastRun *time.Time, critCount int, totCount int, broker string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

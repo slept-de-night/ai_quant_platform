@@ -349,3 +349,46 @@ func TestHTTPGatedUnfreezePreconditions(t *testing.T) {
 		t.Fatalf("Expected engine to be unfrozen")
 	}
 }
+
+func TestHTTPBrokerSwitchInvalidatesReconciliationAndFreezes(t *testing.T) {
+	mux, engine, brokerReg, reconciler := setupTestServer()
+
+	// Register a second broker
+	extraBroker := broker.NewPaperAdapter("extra-paper", 100000.0)
+	brokerReg.Register(extraBroker)
+
+	// 1. Establish clean reconciliation for active broker "paper-sim"
+	reconciler.RecordRun("paper-sim", reconciliation.Diff{
+		TotalCount:  0,
+		HasCritical: false,
+		GeneratedAt: time.Now().UTC(),
+	})
+	engine.UnfreezeWithReason("test unfreeze", "tester", "")
+	if engine.IsFrozen() {
+		t.Fatalf("Expected engine to be active")
+	}
+
+	// 2. Switch broker to extra-paper -> should invalidate reconciliation and freeze OMS
+	switchBody, _ := json.Marshal(map[string]string{"name": "extra-paper"})
+	switchReq := httptest.NewRequest("POST", "/api/v1/brokers/select", bytes.NewReader(switchBody))
+	switchW := httptest.NewRecorder()
+	mux.ServeHTTP(switchW, switchReq)
+
+	if switchW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK from broker select, got %d", switchW.Code)
+	}
+
+	if !engine.IsFrozen() {
+		t.Fatalf("Expected engine to be frozen after switching active broker")
+	}
+
+	// 3. Trying to unfreeze before running reconciliation on new broker must fail (409 Conflict)
+	unfreezeBody, _ := json.Marshal(map[string]string{"reason": "attempt unfreeze after switch"})
+	unfreezeReq := httptest.NewRequest("POST", "/api/v1/risk/unfreeze", bytes.NewReader(unfreezeBody))
+	unfreezeW := httptest.NewRecorder()
+	mux.ServeHTTP(unfreezeW, unfreezeReq)
+
+	if unfreezeW.Code != http.StatusConflict {
+		t.Fatalf("Expected 409 Conflict when unfreezing without new broker reconciliation, got %d", unfreezeW.Code)
+	}
+}

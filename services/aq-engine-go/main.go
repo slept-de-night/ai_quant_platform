@@ -491,9 +491,10 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 	// 8. Safe Gated Resume / Unfreeze Execution
 	mux.HandleFunc("POST /api/v1/risk/unfreeze", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Reason      string `json:"reason"`
-			RequestedBy string `json:"requested_by"`
-			Override    bool   `json:"override"`
+			Reason              string `json:"reason"`
+			RequestedBy         string `json:"requested_by"`
+			ReconciliationRunID string `json:"reconciliation_run_id"`
+			Override            bool   `json:"override"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -513,13 +514,15 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			blockingReasons = append(blockingReasons, "no_active_broker_configured")
 		}
 
-		reconStatus, isFresh, _, critCount, _, _ := reconciler.GetSummary(now)
+		reconStatus, isFresh, _, critCount, _, reconBroker := reconciler.GetSummary(now)
 		if reconStatus == "UNKNOWN" {
 			blockingReasons = append(blockingReasons, "reconciliation_never_run")
 		} else if !isFresh {
 			blockingReasons = append(blockingReasons, "reconciliation_evidence_stale")
 		} else if critCount > 0 {
 			blockingReasons = append(blockingReasons, fmt.Sprintf("critical_discrepancies_present_%d", critCount))
+		} else if activeB != nil && reconBroker != activeB.Name() {
+			blockingReasons = append(blockingReasons, fmt.Sprintf("reconciliation_broker_mismatch_last_%s_active_%s", reconBroker, activeB.Name()))
 		}
 
 		if len(blockingReasons) > 0 && !req.Override {
@@ -538,7 +541,7 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		if by == "" {
 			by = "local-operator"
 		}
-		engine.UnfreezeWithReason(req.Reason, by, "")
+		engine.UnfreezeWithReason(req.Reason, by, req.ReconciliationRunID)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"resumed":   true,
@@ -618,10 +621,22 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			http.Error(w, "invalid request payload", http.StatusBadRequest)
 			return
 		}
+		currentActive, _ := brokerReg.GetActive()
+		currentName := ""
+		if currentActive != nil {
+			currentName = currentActive.Name()
+		}
+
 		if err := brokerReg.SetActive(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		if currentName != req.Name {
+			reconciler.Invalidate()
+			engine.FreezeWithReason(fmt.Sprintf("active broker changed from %s to %s; reconciliation required", currentName, req.Name), "broker_manager", "")
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status": "selected",

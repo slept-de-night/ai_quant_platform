@@ -74,3 +74,35 @@ func (r *Registry) List() []Health {
 	}
 	return list
 }
+
+type BrokerHealthResponse struct {
+	ActiveBroker         string      `json:"active_broker"`
+	Environment          Environment `json:"environment"`
+	Ready                bool        `json:"ready"`
+	Connected            bool        `json:"connected"`
+	Message              string      `json:"message"`
+	AllRegisteredBrokers []Health    `json:"all_registered_brokers"`
+}
+
+func (r *Registry) GetHealthSummary() (BrokerHealthResponse, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	active, err := r.GetActive()
+	if err != nil {
+		return BrokerHealthResponse{
+			AllRegisteredBrokers: r.List(),
+		}, err
+	}
+
+	h := active.GetHealth()
+	return BrokerHealthResponse{
+		ActiveBroker:         active.Name(),
+		Environment:          active.Environment(),
+		Ready:                h.Ready,
+		Connected:            h.Connected,
+		Message:              h.Message,
+		AllRegisteredBrokers: r.List(),
+	}, nil
+}
+

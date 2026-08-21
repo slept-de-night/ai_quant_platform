@@ -171,3 +171,50 @@ func TestHTTPKillSwitchAndReadOnlyAccess(t *testing.T) {
 		t.Fatalf("Orders history query failed while frozen: %d", histW.Code)
 	}
 }
+
+func TestHTTPBrokersHealthAndSwitch(t *testing.T) {
+	mux, _, brokerReg := setupTestServer()
+
+	// Register extra broker
+	alpaca := broker.NewAlpacaAdapter("alpaca-paper", "", "", true)
+	brokerReg.Register(alpaca)
+
+	// 1. GET /api/v1/brokers/health
+	healthReq := httptest.NewRequest("GET", "/api/v1/brokers/health", nil)
+	healthW := httptest.NewRecorder()
+	mux.ServeHTTP(healthW, healthReq)
+
+	if healthW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 from /api/v1/brokers/health, got %d", healthW.Code)
+	}
+
+	var healthRes broker.BrokerHealthResponse
+	if err := json.NewDecoder(healthW.Body).Decode(&healthRes); err != nil {
+		t.Fatalf("Failed to decode health response: %v", err)
+	}
+	if healthRes.ActiveBroker != "paper-sim" {
+		t.Fatalf("Expected active broker 'paper-sim', got '%s'", healthRes.ActiveBroker)
+	}
+	if !healthRes.Ready {
+		t.Fatalf("Expected Ready=true in health response")
+	}
+	if len(healthRes.AllRegisteredBrokers) != 2 {
+		t.Fatalf("Expected 2 registered brokers, got %d", len(healthRes.AllRegisteredBrokers))
+	}
+
+	// 2. POST /api/v1/brokers/select to switch to alpaca-paper
+	switchBody, _ := json.Marshal(map[string]string{"name": "alpaca-paper"})
+	switchReq := httptest.NewRequest("POST", "/api/v1/brokers/select", bytes.NewReader(switchBody))
+	switchW := httptest.NewRecorder()
+	mux.ServeHTTP(switchW, switchReq)
+
+	if switchW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 from /api/v1/brokers/select, got %d", switchW.Code)
+	}
+
+	active, err := brokerReg.GetActive()
+	if err != nil || active.Name() != "alpaca-paper" {
+		t.Fatalf("Expected active broker to switch to alpaca-paper, got %v", active)
+	}
+}
+

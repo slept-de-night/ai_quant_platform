@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"aq-engine-go/broker"
@@ -66,9 +67,29 @@ func main() {
 	webullAdapter := broker.NewWebullAdapter("webull-main", webullKey, webullSecret, webullAccount, true)
 	alpacaAdapter := broker.NewAlpacaAdapter("alpaca-paper", alpacaKey, alpacaSecret, true)
 
-	brokerReg.Register(webullAdapter) // default main
-	brokerReg.Register(alpacaAdapter)
+	// Safe default startup broker is paper
 	brokerReg.Register(paperAdapter)
+	brokerReg.Register(alpacaAdapter)
+	brokerReg.Register(webullAdapter)
+
+	execBroker := strings.ToLower(strings.TrimSpace(os.Getenv("EXECUTION_BROKER")))
+	switch execBroker {
+	case "alpaca":
+		if alpacaKey == "" || alpacaSecret == "" {
+			log.Printf("[BROKER WARNING] EXECUTION_BROKER=alpaca requested but credentials missing; operating in safe paper simulation fallback")
+		}
+		_ = brokerReg.SetActive("alpaca-paper")
+		log.Printf("[BROKER POSTURE] Active broker set to Alpaca Paper Adapter")
+	case "webull":
+		if webullKey == "" || webullSecret == "" {
+			log.Printf("[BROKER WARNING] EXECUTION_BROKER=webull requested but credentials missing; operating in safe paper simulation fallback")
+		}
+		_ = brokerReg.SetActive("webull-main")
+		log.Printf("[BROKER POSTURE] Active broker set to Webull Main Adapter")
+	default:
+		_ = brokerReg.SetActive("paper-simulation")
+		log.Printf("[BROKER POSTURE] Active broker set to default Paper Simulation Adapter")
+	}
 
 	// Seed some baseline market ticks
 	gateway.PublishTick(models.MarketTick{Symbol: "SPY", Price: 512.45, Volume: 4500000, Timestamp: time.Now().UTC()})
@@ -286,6 +307,16 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 	})
 
 	// 11. Pluggable Broker Management Endpoints
+	mux.HandleFunc("GET /api/v1/brokers/health", func(w http.ResponseWriter, r *http.Request) {
+		summary, err := brokerReg.GetHealthSummary()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(summary)
+	})
+
 	mux.HandleFunc("GET /api/v1/brokers", func(w http.ResponseWriter, r *http.Request) {
 		activeB, _ := brokerReg.GetActive()
 		activeName := ""

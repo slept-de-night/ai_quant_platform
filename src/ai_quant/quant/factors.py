@@ -150,6 +150,59 @@ class CrossSectionalTransformer:
         }
 
 
+class PolymorphicFactorNeutralizer:
+    """Cross-Asset Factor Neutralization tailored for polymorphic asset classes."""
+
+    @staticmethod
+    def neutralize_equity(
+        factor_scores: pd.Series,
+        market_beta: pd.Series,
+        sector_dummies: Optional[pd.DataFrame] = None,
+    ) -> pd.Series:
+        """Barra-style sector & market beta neutralization for equities."""
+        exposures = pd.DataFrame({"market_beta": market_beta}, index=factor_scores.index)
+        if sector_dummies is not None:
+            for col in sector_dummies.columns:
+                exposures[col] = sector_dummies[col]
+        return CrossSectionalTransformer.neutralize(factor_scores, exposures)
+
+    @staticmethod
+    def neutralize_crypto(
+        factor_scores: pd.Series,
+        btc_beta: pd.Series,
+        eth_beta: Optional[pd.Series] = None,
+    ) -> pd.Series:
+        """Neutralizes crypto factor alphas against BTC (and optionally ETH) systemic market beta."""
+        exposures = pd.DataFrame({"btc_beta": btc_beta}, index=factor_scores.index)
+        if eth_beta is not None:
+            exposures["eth_beta"] = eth_beta
+        return CrossSectionalTransformer.neutralize(factor_scores, exposures)
+
+    @staticmethod
+    def neutralize_commodity(
+        factor_scores: pd.Series,
+        dxy_beta: pd.Series,
+        real_yield_beta: Optional[pd.Series] = None,
+    ) -> pd.Series:
+        """Neutralizes commodity alphas against USD Index (DXY) and Real Interest Rate sensitivities."""
+        exposures = pd.DataFrame({"dxy_beta": dxy_beta}, index=factor_scores.index)
+        if real_yield_beta is not None:
+            exposures["real_yield_beta"] = real_yield_beta
+        return CrossSectionalTransformer.neutralize(factor_scores, exposures)
+
+    @staticmethod
+    def neutralize_forex(
+        factor_scores: pd.Series,
+        carry_differential: pd.Series,
+        global_risk_beta: Optional[pd.Series] = None,
+    ) -> pd.Series:
+        """Neutralizes FX strategy signals against interest rate carry differential and global risk sentiment."""
+        exposures = pd.DataFrame({"carry_diff": carry_differential}, index=factor_scores.index)
+        if global_risk_beta is not None:
+            exposures["global_risk"] = global_risk_beta
+        return CrossSectionalTransformer.neutralize(factor_scores, exposures)
+
+
 def seed_strategies() -> List[StrategySpec]:
     """Default institutional baseline alpha strategies."""
     return [

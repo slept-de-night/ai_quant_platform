@@ -8,6 +8,47 @@ from ..core.models import FoldResult, StrategySpec, ValidationReport
 from .backtest import run_backtest
 
 
+import math
+
+def compute_dsr(
+    observed_sharpe: float,
+    sharpe_variance: float,
+    n_trials: int,
+    sample_length: int,
+    skewness: float = 0.0,
+    kurtosis: float = 3.0,
+) -> float:
+    """
+    Computes Deflated Sharpe Ratio (DSR) per Bailey & López de Prado (2014).
+    DSR tests the hypothesis that the observed Sharpe is inflated by multiple testing and non-normal returns.
+    """
+    if n_trials <= 1 or sharpe_variance <= 0:
+        return 0.5
+
+    euler_mascheroni = 0.5772156649
+    exp_max_sharpe = math.sqrt(sharpe_variance) * (
+        (1.0 - euler_mascheroni) * (2.0 * math.log(n_trials)) ** -0.5
+        + (2.0 * math.log(n_trials)) ** 0.5
+    )
+
+    # Standard deviation of Sharpe ratio under non-normality
+    var_sr_term = 1.0 - skewness * observed_sharpe + ((kurtosis - 1.0) / 4.0) * (observed_sharpe ** 2)
+    denom = math.sqrt(max(1e-6, var_sr_term / max(1, sample_length)))
+
+    z_stat = (observed_sharpe - exp_max_sharpe) / denom
+    dsr = float(0.5 * (1.0 + math.erf(z_stat / math.sqrt(2.0))))
+    return round(max(0.0, min(1.0, dsr)), 4)
+
+
+def compute_pbo_from_folds(sharpes: List[float]) -> float:
+    """
+    Computes empirical Probability of Backtest Overfitting (PBO) across validation folds.
+    """
+    if not sharpes:
+        return 1.0
+    return round(float(sum(s <= 0 for s in sharpes) / len(sharpes)), 4)
+
+
 def walk_forward_validate(
     bars,
     spec: StrategySpec,
@@ -82,27 +123,10 @@ def walk_forward_validate(
     )
 
     # Deflated Sharpe Ratio (DSR) & PBO calculation
-    # Bailey & López de Prado (2014)
     n_trials = max(1, len(folds) * 3)
     var_sharpe = float(statistics.variance(sharpes)) if len(sharpes) > 1 else 0.05
-    euler_mascheroni = 0.5772156649
-    # Expected maximum Sharpe under null hypothesis of no true alpha
-    import math
-    if n_trials > 1 and var_sharpe > 0:
-        exp_max_sharpe = math.sqrt(var_sharpe) * (
-            (1.0 - euler_mascheroni) * (2.0 * math.log(n_trials)) ** -0.5
-            + (2.0 * math.log(n_trials)) ** 0.5
-        )
-    else:
-        exp_max_sharpe = 0.0
-
-    # Normal CDF approximation for DSR
-    denom = math.sqrt(1.0 - 0.0 + (med ** 2) / (2.0 * len(bars))) if len(bars) > 0 else 1.0
-    z_stat = (med - exp_max_sharpe) * math.sqrt(len(bars) / 252.0) / max(denom, 1e-6)
-    dsr = float(0.5 * (1.0 + math.erf(z_stat / math.sqrt(2.0))))
-    
-    # Probability of Backtest Overfitting (PBO): fraction of negative out-of-sample folds
-    pbo = float(sum(s <= 0 for s in sharpes) / len(sharpes))
+    dsr = compute_dsr(med, var_sharpe, n_trials, len(bars))
+    pbo = compute_pbo_from_folds(sharpes)
 
     failures = []
     if med < min_sharpe:

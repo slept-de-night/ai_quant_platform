@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -298,6 +299,26 @@ func main() {
 		engine.FreezeWithReason("no active broker registered", "startup_gate", "")
 		log.Printf("[STARTUP GATE] No active broker registered. OMS state: FROZEN")
 	}
+
+	// Continuous Background Reconciliation Worker
+	reconInterval := 30 * time.Second
+	if intervalStr := os.Getenv("RECONCILIATION_INTERVAL_SECONDS"); intervalStr != "" {
+		if sec, err := strconv.Atoi(intervalStr); err == nil && sec > 0 {
+			reconInterval = time.Duration(sec) * time.Second
+		}
+	}
+	brokerSupplier := func() (string, *reconciliation.BrokerState, error) {
+		activeB, err := brokerReg.GetActive()
+		if err != nil || activeB == nil {
+			return "", nil, fmt.Errorf("no active broker configured")
+		}
+		snap, err := activeB.GetBrokerSnapshot()
+		return activeB.Name(), snap, err
+	}
+	reconWorker := reconciliation.NewWorker(reconciler, engine, brokerSupplier, reconInterval, reconcilerMaxAge)
+	reconWorker.Start(context.Background())
+	defer reconWorker.Stop()
+	log.Printf("[RECONCILIATION WORKER] Started continuous background reconciliation loop (interval: %v, max age: %v)", reconInterval, reconcilerMaxAge)
 
 	mux := setupRouter(engine, brokerReg, gateway, reconciler)
 

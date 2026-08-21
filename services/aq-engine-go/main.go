@@ -555,7 +555,17 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		if by == "" {
 			by = "local-operator"
 		}
-		engine.UnfreezeWithReason(req.Reason, by, req.ReconciliationRunID)
+		if err := engine.UnfreezeWithReason(req.Reason, by, req.ReconciliationRunID); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"resumed":          false,
+				"is_frozen":        true,
+				"blocking_reasons": []string{"unfreeze_journal_error: " + err.Error()},
+				"message":          "Execution resume BLOCKED: Failed to journal unfreeze event",
+			})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"resumed":   true,

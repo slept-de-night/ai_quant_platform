@@ -42,10 +42,24 @@ type JournalEvent struct {
 }
 
 type Journal struct {
-	path string
-	file *os.File
-	mu   sync.Mutex
-	seq  int64
+	path           string
+	file           *os.File
+	mu             sync.Mutex
+	seq            int64
+	injectWriteErr error
+	injectSyncErr  error
+}
+
+func (j *Journal) SetInjectWriteError(err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.injectWriteErr = err
+}
+
+func (j *Journal) SetInjectSyncError(err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.injectSyncErr = err
 }
 
 func NewJournal(path string) (*Journal, error) {
@@ -90,6 +104,10 @@ func (j *Journal) RecordEventWithContext(evtType JournalEventType, order *models
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
+	if j.injectWriteErr != nil {
+		return fmt.Errorf("injected disk write error: %w", j.injectWriteErr)
+	}
+
 	j.seq++
 	now := time.Now().UTC()
 	evt := JournalEvent{
@@ -115,6 +133,10 @@ func (j *Journal) RecordEventWithContext(evtType JournalEventType, order *models
 
 	if _, err := j.file.Write(append(bytes, '\n')); err != nil {
 		return fmt.Errorf("failed to write journal event to disk: %w", err)
+	}
+
+	if j.injectSyncErr != nil {
+		return fmt.Errorf("injected fsync error: %w", j.injectSyncErr)
 	}
 
 	return j.file.Sync() // Durable fsync

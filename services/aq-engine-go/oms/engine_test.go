@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -873,5 +874,171 @@ func TestRiskNotionalSlippageDerivation(t *testing.T) {
 		t.Fatalf("Expected rejection when conservative risk notional with slippage exceeds max position sizing")
 	}
 }
+
+func TestJournalWriteFailureFailsClosedAndFreezesEngine(t *testing.T) {
+	tmpDir := t.TempDir()
+	journalPath := filepath.Join(tmpDir, "oms-fail-write.jsonl")
+	j, err := NewJournal(journalPath)
+	if err != nil {
+		t.Fatalf("Failed to create journal: %v", err)
+	}
+	defer j.Close()
+
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	engine.SetJournal(j)
+
+	if !engine.IsJournalReady() {
+		t.Fatalf("Expected journal to be ready initially")
+	}
+	if engine.IsFrozen() {
+		t.Fatalf("Expected engine to be unfrozen initially")
+	}
+
+	// Inject disk write failure into journal
+	j.SetInjectWriteError(errors.New("disk full: write failed"))
+
+	ord := &models.OrderIntent{
+		Symbol:         "MSFT",
+		Side:           models.SideBuy,
+		Qty:            10,
+		ReferencePrice: 300.0,
+		ClientOrderID:  "fail-write-ord-1",
+	}
+
+	res, dec := engine.ReserveOrder(ord)
+	if res != nil || dec.Approved {
+		t.Fatalf("Expected ReserveOrder to fail closed on journal write error; got approved=%v, res=%v", dec.Approved, res)
+	}
+	if !engine.IsFrozen() {
+		t.Fatalf("Expected engine to automatically freeze upon durable journal write failure")
+	}
+	if engine.IsJournalReady() {
+		t.Fatalf("Expected engine.IsJournalReady() to become false after journal write error")
+	}
+
+	// Verify order was not committed to in-memory order history
+	if _, exists := engine.GetOrderByClientID("fail-write-ord-1"); exists {
+		t.Fatalf("Order must not exist in history when journal write failed")
+	}
+
+	// Verify subsequent orders are blocked
+	dec2 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:         "MSFT",
+		Side:           models.SideBuy,
+		Qty:            5,
+		ReferencePrice: 300.0,
+		ClientOrderID:  "blocked-after-fail",
+	})
+	if dec2.Approved {
+		t.Fatalf("Subsequent orders must be rejected when engine is frozen")
+	}
+}
+
+func TestJournalFsyncFailureOnFillFailsClosedAndFreezesEngine(t *testing.T) {
+	tmpDir := t.TempDir()
+	journalPath := filepath.Join(tmpDir, "oms-fail-sync.jsonl")
+	j, err := NewJournal(journalPath)
+	if err != nil {
+		t.Fatalf("Failed to create journal: %v", err)
+	}
+	defer j.Close()
+
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	engine.SetJournal(j)
+
+	// Inject fsync failure
+	j.SetInjectSyncError(errors.New("eio: fsync failed"))
+
+	fill := models.Fill{
+		FillID:        "fill-sync-fail-1",
+		ClientOrderID: "client-sync-fail",
+		Symbol:        "NVDA",
+		Side:          models.SideBuy,
+		Qty:           10,
+		Price:         100.0,
+		Timestamp:     time.Now().UTC(),
+	}
+
+	pos, err := engine.ApplyFill(fill)
+	if err == nil || pos != nil {
+		t.Fatalf("Expected ApplyFill to fail on fsync error; got pos=%v, err=%v", pos, err)
+	}
+	if !engine.IsFrozen() {
+		t.Fatalf("Expected engine to freeze on fill fsync failure")
+	}
+	if engine.IsJournalReady() {
+		t.Fatalf("Expected journalReady to be false after fsync error")
+	}
+
+	// Verify fill was not applied to cash or positions
+	p := engine.GetPortfolio("NVDA")
+	if p.Cash != 100000.0 {
+		t.Fatalf("Cash must not be modified when journal write failed; got %.2f", p.Cash)
+	}
+	if p.CurrentSymbolQty != 0 {
+		t.Fatalf("Position qty must not be modified when journal write failed; got %.2f", p.CurrentSymbolQty)
+	}
+}
+
+func TestJournalWriteFailureOnUnfreezePreventsExecutionResume(t *testing.T) {
+	tmpDir := t.TempDir()
+	journalPath := filepath.Join(tmpDir, "oms-fail-unfreeze.jsonl")
+	j, err := NewJournal(journalPath)
+	if err != nil {
+		t.Fatalf("Failed to create journal: %v", err)
+	}
+	defer j.Close()
+
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	engine.SetJournal(j)
+
+	// Freeze engine
+	engine.FreezeWithReason("emergency maintenance", "operator", "")
+	if !engine.IsFrozen() {
+		t.Fatalf("Expected engine to be frozen")
+	}
+
+	// Inject write failure
+	j.SetInjectWriteError(errors.New("read-only filesystem"))
+
+	err = engine.UnfreezeWithReason("resume trading", "operator", "")
+	if err == nil {
+		t.Fatalf("Expected UnfreezeWithReason to return error on journal write failure")
+	}
+	if !engine.IsFrozen() {
+		t.Fatalf("Engine must remain frozen when unfreeze journal write fails")
+	}
+	if engine.IsJournalReady() {
+		t.Fatalf("Journal must be marked unready when write fails")
+	}
+}
+
+func TestUnreadyJournalBlocksCheckRiskAndReserveOrder(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	engine.SetJournalReady(false)
+
+	ord := &models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            10,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "unready-journal-chk",
+	}
+
+	dec := engine.CheckRisk(ord)
+	if dec.Approved {
+		t.Fatalf("CheckRisk must reject order when journal is not ready")
+	}
+
+	res, dec2 := engine.ReserveOrder(ord)
+	if res != nil || dec2.Approved {
+		t.Fatalf("ReserveOrder must reject order when journal is not ready")
+	}
+}
+
 
 

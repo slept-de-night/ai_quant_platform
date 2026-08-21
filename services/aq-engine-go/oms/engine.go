@@ -111,6 +111,30 @@ func (e *Engine) IsJournalReady() bool {
 	return e.journalReady
 }
 
+// recordEventLocked durably writes a critical journal event and fails closed if disk write/fsync fails.
+func (e *Engine) recordEventLocked(evtType JournalEventType, order *models.OrderIntent, fill *models.Fill, clientOrderID, brokerOrderID, reason string) error {
+	if e.journal == nil {
+		if !e.journalReady {
+			return errors.New("durable journal is not ready")
+		}
+		return nil
+	}
+
+	err := e.journal.RecordEvent(evtType, order, fill, clientOrderID, brokerOrderID, reason)
+	if err != nil {
+		e.journalReady = false
+		e.isFrozen = true
+		e.portfolio.IsFrozen = true
+		e.freezeReason = fmt.Sprintf("durable journal write failure on %s: %v", evtType, err)
+		now := time.Now().UTC()
+		e.frozenAt = &now
+		e.frozenBy = "journal_system"
+		metrics.DefaultRegistry.IncEngineFreeze()
+		return fmt.Errorf("journal write error (%s): %w", evtType, err)
+	}
+	return nil
+}
+
 func (e *Engine) Freeze() {
 	e.FreezeWithReason("emergency manual freeze", "operator", "")
 }
@@ -126,23 +150,33 @@ func (e *Engine) FreezeWithReason(reason, by, runID string) {
 	now := time.Now().UTC()
 	e.frozenAt = &now
 	metrics.DefaultRegistry.IncEngineFreeze()
-	_ = e.journal.RecordEvent(EventEngineFrozen, nil, nil, reason, by, runID)
+	_ = e.recordEventLocked(EventEngineFrozen, nil, nil, reason, by, runID)
 }
 
 func (e *Engine) Unfreeze() {
-	e.UnfreezeWithReason("manual unfreeze", "operator", "")
+	_ = e.UnfreezeWithReason("manual unfreeze", "operator", "")
 }
 
-func (e *Engine) UnfreezeWithReason(reason, by, runID string) {
+func (e *Engine) UnfreezeWithReason(reason, by, runID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if !e.journalReady {
+		return errors.New("cannot unfreeze: durable journal is not ready")
+	}
+
+	err := e.recordEventLocked(EventEngineUnfrozen, nil, nil, reason, by, runID)
+	if err != nil {
+		return fmt.Errorf("failed to journal unfreeze event: %w", err)
+	}
+
 	e.isFrozen = false
 	e.portfolio.IsFrozen = false
 	e.freezeReason = ""
 	e.frozenBy = ""
 	e.frozenRunID = ""
 	e.frozenAt = nil
-	_ = e.journal.RecordEvent(EventEngineUnfrozen, nil, nil, reason, by, runID)
+	return nil
 }
 
 func (e *Engine) GetFreezeInfo() (isFrozen bool, reason string, at *time.Time, by string, runID string) {
@@ -252,11 +286,16 @@ func (e *Engine) ApplyFill(fill models.Fill) (*models.Position, error) {
 		fill.Timestamp = time.Now().UTC()
 	}
 
-	// 2. Record fill in ledger
+	// 2. Durably record fill event to journal BEFORE mutating in-memory state (write-ahead)
+	if err := e.recordEventLocked(EventFillRecorded, nil, &fill, fill.ClientOrderID, fill.BrokerOrderID, ""); err != nil {
+		return nil, fmt.Errorf("durable journal write failed for fill %s: %w", fill.FillID, err)
+	}
+
+	// 3. Record fill in ledger
 	e.fills[fill.FillID] = fill
 	e.fillList = append(e.fillList, fill)
 
-	// 3. Update OrderIntent in history
+	// 4. Update OrderIntent in history
 	if ord, exists := e.orderHistory[fill.ClientOrderID]; exists {
 		prevFilledQty := ord.FilledQtyFloat
 		prevCost := prevFilledQty * ord.AverageFillPrice
@@ -293,7 +332,7 @@ func (e *Engine) ApplyFill(fill models.Fill) (*models.Position, error) {
 		}
 	}
 
-	// 4. Update Position Projection from confirmed fill
+	// 5. Update Position Projection from confirmed fill
 	pos := e.positions[fill.Symbol]
 	pos.Symbol = fill.Symbol
 
@@ -309,7 +348,7 @@ func (e *Engine) ApplyFill(fill models.Fill) (*models.Position, error) {
 	}
 	e.positions[fill.Symbol] = pos
 
-	// 5. Update portfolio aggregates
+	// 6. Update portfolio aggregates
 	var totalGross float64
 	var totalPosVal float64
 	for _, p := range e.positions {
@@ -323,21 +362,36 @@ func (e *Engine) ApplyFill(fill models.Fill) (*models.Position, error) {
 	}
 
 	metrics.DefaultRegistry.IncFillsProcessed()
-	_ = e.journal.RecordEvent(EventFillRecorded, nil, &fill, fill.ClientOrderID, fill.BrokerOrderID, "")
 	return &pos, nil
 }
 
-func (e *Engine) UpdateOrderStatus(clientOrderID string, status models.OrderStatus, reasons ...string) {
-	e.UpdateOrderStatusAndBrokerID(clientOrderID, status, "", reasons...)
+func (e *Engine) UpdateOrderStatus(clientOrderID string, status models.OrderStatus, reasons ...string) error {
+	return e.UpdateOrderStatusAndBrokerID(clientOrderID, status, "", reasons...)
 }
 
-func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status models.OrderStatus, brokerOrderID string, reasons ...string) {
+func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status models.OrderStatus, brokerOrderID string, reasons ...string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	reasonStr := ""
 	if len(reasons) > 0 {
 		reasonStr = reasons[0]
+	}
+
+	var evtType JournalEventType
+	switch status {
+	case models.OrderStatusAcknowledged:
+		evtType = EventOrderAcknowledged
+	case models.OrderStatusSubmitFailed:
+		evtType = EventOrderSubmitFailed
+	case models.OrderStatusCancelled:
+		evtType = EventOrderCanceled
+	}
+
+	if evtType != "" {
+		if err := e.recordEventLocked(evtType, nil, nil, clientOrderID, brokerOrderID, reasonStr); err != nil {
+			return fmt.Errorf("failed to journal order status %s: %w", status, err)
+		}
 	}
 
 	if ord, exists := e.orderHistory[clientOrderID]; exists {
@@ -364,15 +418,7 @@ func (e *Engine) UpdateOrderStatusAndBrokerID(clientOrderID string, status model
 			}
 		}
 	}
-
-	switch status {
-	case models.OrderStatusAcknowledged:
-		_ = e.journal.RecordEvent(EventOrderAcknowledged, nil, nil, clientOrderID, brokerOrderID, reasonStr)
-	case models.OrderStatusSubmitFailed:
-		_ = e.journal.RecordEvent(EventOrderSubmitFailed, nil, nil, clientOrderID, brokerOrderID, reasonStr)
-	case models.OrderStatusCancelled:
-		_ = e.journal.RecordEvent(EventOrderCanceled, nil, nil, clientOrderID, brokerOrderID, reasonStr)
-	}
+	return nil
 }
 
 func (e *Engine) UpdatePortfolio(equity, cash, grossExposure float64) {
@@ -397,9 +443,13 @@ func (e *Engine) UpdatePortfolio(equity, cash, grossExposure float64) {
 func (e *Engine) evaluateRiskRules(p models.PortfolioState, dailyOrders int, order *models.OrderIntent) []string {
 	var reasons []string
 
-	// 1. Emergency Kill Switch / Freeze Check
+	// 1. Emergency Kill Switch / Freeze & Journal Readiness Check
 	if e.isFrozen {
 		reasons = append(reasons, "Emergency Kill Switch Active: Firm-wide trading is currently FROZEN")
+		return reasons
+	}
+	if !e.journalReady {
+		reasons = append(reasons, "Execution blocked: durable journal is not ready/healthy")
 		return reasons
 	}
 
@@ -622,11 +672,21 @@ func (e *Engine) ReserveOrder(order *models.OrderIntent) (*models.OrderIntent, m
 	ordCopy.Status = models.OrderStatusSubmitting
 	ordCopy.UpdatedAt = ordCopy.CreatedAt
 
+	// Write-Ahead: Durably record event to journal before committing to in-memory history
+	if err := e.recordEventLocked(EventOrderSubmitting, &ordCopy, nil, ordCopy.ClientOrderID, "", ""); err != nil {
+		ordCopy.Status = models.OrderStatusRejected
+		metrics.DefaultRegistry.IncOrdersRejected()
+		return nil, models.RiskDecision{
+			Approved: false,
+			Order:    &ordCopy,
+			Reasons:  []string{fmt.Sprintf("Execution blocked: journal persistence error: %v", err)},
+			TraceID:  traceID,
+		}
+	}
+
 	e.orderHistory[ordCopy.ClientOrderID] = ordCopy
 	e.orderList = append(e.orderList, ordCopy)
 	e.dailyOrders++
-
-	_ = e.journal.RecordEvent(EventOrderSubmitting, &ordCopy, nil, ordCopy.ClientOrderID, "", "")
 
 	return &ordCopy, models.RiskDecision{
 		Approved: true,

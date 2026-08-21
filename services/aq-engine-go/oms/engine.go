@@ -191,6 +191,57 @@ func (e *Engine) IsFrozen() bool {
 	return e.isFrozen
 }
 
+// computeActiveReservationsLocked computes aggregated exposure and cash reservations from all outstanding/in-flight orders.
+func (e *Engine) computeActiveReservationsLocked(targetSymbol string) (reservedCash, reservedBuyNotional, reservedGross, reservedSymbolExposure, reservedSellQty float64) {
+	slippage := e.slippageBuffer
+	if slippage <= 0 {
+		slippage = 0.005
+	}
+
+	for _, ord := range e.orderHistory {
+		switch ord.Status {
+		case models.OrderStatusSubmitting,
+			models.OrderStatusSubmissionUnknown,
+			models.OrderStatusAcknowledged,
+			models.OrderStatusPartiallyFilled,
+			models.OrderStatusCancelPending:
+
+			targetQty := float64(ord.Qty)
+			if ord.RequestedQty > 0 {
+				targetQty = ord.RequestedQty
+			}
+			remainingQty := targetQty - ord.FilledQtyFloat
+			if remainingQty <= 0 {
+				continue
+			}
+
+			price := ord.ReferencePrice
+			if price <= 0 && e.gateway != nil {
+				if tick, ok := e.gateway.GetLatestTick(ord.Symbol); ok && tick.Price > 0 {
+					price = tick.Price
+				}
+			}
+
+			if ord.Side == models.SideBuy {
+				notionalWithSlippage := remainingQty * price * (1.0 + slippage)
+				reservedCash += notionalWithSlippage
+				reservedBuyNotional += notionalWithSlippage
+				reservedGross += notionalWithSlippage
+				if strings.EqualFold(ord.Symbol, targetSymbol) {
+					reservedSymbolExposure += notionalWithSlippage
+				}
+			} else if ord.Side == models.SideSell {
+				notional := remainingQty * price
+				reservedGross += notional
+				if strings.EqualFold(ord.Symbol, targetSymbol) {
+					reservedSellQty += remainingQty
+				}
+			}
+		}
+	}
+	return
+}
+
 func (e *Engine) GetPortfolio(symbol string) models.PortfolioState {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -198,6 +249,14 @@ func (e *Engine) GetPortfolio(symbol string) models.PortfolioState {
 	p := e.portfolio
 	p.OrdersToday = e.dailyOrders
 	p.IsFrozen = e.isFrozen
+
+	resCash, resBuyNotional, resGross, resSymExp, resSellQty := e.computeActiveReservationsLocked(symbol)
+	p.ReservedCash = resCash
+	p.ReservedBuyNotional = resBuyNotional
+	p.ReservedGrossExposure = resGross
+	p.ReservedSymbolExposure = resSymExp
+	p.ReservedSellQty = resSellQty
+
 	if symbol != "" {
 		if pos, ok := e.positions[symbol]; ok {
 			p.CurrentSymbolQty = pos.Qty
@@ -567,39 +626,44 @@ func (e *Engine) evaluateRiskRules(p models.PortfolioState, dailyOrders int, ord
 		reasons = append(reasons, fmt.Sprintf("Order notional $%.2f is below minimum threshold $%.2f", riskNotional, e.config.MinOrderNotional))
 	}
 
-	// 9. Buy-Specific Balance and Exposure Limits (using riskNotional with slippage buffer)
+	// Compute open/pending order reservations
+	resCash, _, resGross, resSymExp, resSellQty := e.computeActiveReservationsLocked(order.Symbol)
+
+	// 9. Buy-Specific Balance and Exposure Limits (incorporating pending order reservations)
 	if order.Side == models.SideBuy {
-		// Minimum Cash Reserve
+		// Minimum Cash Reserve (Cash - reservedCash - riskNotional must be >= minCash)
 		minCash := e.config.MinCashReservePct * p.Equity
-		if (p.Cash - riskNotional) < minCash {
-			reasons = append(reasons, fmt.Sprintf("Cash after order ($%.2f) falls below required reserve ($%.2f)", p.Cash-riskNotional, minCash))
+		availCash := p.Cash - resCash
+		if (availCash - riskNotional) < minCash {
+			reasons = append(reasons, fmt.Sprintf("Cash after order and reservations ($%.2f = cash $%.2f - reserved $%.2f - order $%.2f) falls below required reserve ($%.2f)", availCash-riskNotional, p.Cash, resCash, riskNotional, minCash))
 		}
 
-		// Maximum Position Sizing Limit
-		newSymExp := p.CurrentSymbolExposure + riskNotional
+		// Maximum Position Sizing Limit (current + reserved + order must be <= maxSymExp)
+		newSymExp := p.CurrentSymbolExposure + resSymExp + riskNotional
 		maxSymExp := e.config.MaxPositionPct * p.Equity
 		if newSymExp > maxSymExp {
-			reasons = append(reasons, fmt.Sprintf("Target position ($%.2f) exceeds max allowed position sizing ($%.2f)", newSymExp, maxSymExp))
+			reasons = append(reasons, fmt.Sprintf("Target position with reservations ($%.2f = current $%.2f + reserved $%.2f + order $%.2f) exceeds max allowed position sizing ($%.2f)", newSymExp, p.CurrentSymbolExposure, resSymExp, riskNotional, maxSymExp))
 		}
 
-		// Maximum Gross Portfolio Exposure Limit
-		newGross := p.GrossExposure + riskNotional
+		// Maximum Gross Portfolio Exposure Limit (current + reserved + order must be <= maxGross)
+		newGross := p.GrossExposure + resGross + riskNotional
 		maxGross := e.config.MaxGrossExposurePct * p.Equity
 		if newGross > maxGross {
-			reasons = append(reasons, fmt.Sprintf("Gross exposure ($%.2f) exceeds max allowed portfolio limit ($%.2f)", newGross, maxGross))
+			reasons = append(reasons, fmt.Sprintf("Gross exposure with reservations ($%.2f = current $%.2f + reserved $%.2f + order $%.2f) exceeds max allowed portfolio limit ($%.2f)", newGross, p.GrossExposure, resGross, riskNotional, maxGross))
 		}
 	}
 
-	// 10. Sell-Specific Controls & Short Selling Prohibition
+	// 10. Sell-Specific Controls & Short Selling Prohibition (incorporating reserved sell qty)
 	if order.Side == models.SideSell {
 		if !e.allowShorting {
 			pos, hasPos := e.positions[order.Symbol]
-			availQty := 0.0
+			confirmedQty := 0.0
 			if hasPos {
-				availQty = pos.Qty
+				confirmedQty = pos.Qty
 			}
-			if availQty < float64(order.Qty) {
-				reasons = append(reasons, fmt.Sprintf("Short selling prohibited: requested sell qty (%d) exceeds confirmed long position (%.0f)", order.Qty, availQty))
+			availableSellQty := confirmedQty - resSellQty
+			if float64(order.Qty) > availableSellQty {
+				reasons = append(reasons, fmt.Sprintf("Short selling prohibited: requested sell qty (%d) exceeds available long position (%.0f = confirmed %.0f - reserved %.0f)", order.Qty, availableSellQty, confirmedQty, resSellQty))
 			}
 		}
 	}

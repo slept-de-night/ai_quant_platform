@@ -1239,6 +1239,235 @@ func TestConfirmedRejection_DoesNotQueryBrokerAndFailsImmediately(t *testing.T) 
 	}
 }
 
+// 13. Test: Pending buy reservations block subsequent distinct buy order exceeding remaining cash
+func TestPendingBuyReservationsBlockSubsequentBuyExceedingCash(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	cfg.MinCashReservePct = 0.05 // Min $500 reserve
+	cfg.MaxPositionPct = 0.80    // Allow up to $8,000 per position
+	cfg.MaxGrossExposurePct = 1.0
+
+	// Starting equity = $10,000, cash = $10,000
+	engine := NewEngine(10000.0, cfg)
+	engine.SetSlippageBuffer(0.005)
+
+	// Order A: BUY 60 shares @ $100 = $6,000 (with slippage $6,030)
+	ordA := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideBuy,
+		Qty:            60,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "buy-reserve-a",
+	}
+
+	resA, decA := engine.ReserveOrder(ordA)
+	if resA == nil || !decA.Approved {
+		t.Fatalf("Order A must be approved; got: %v", decA.Reasons)
+	}
+
+	// Verify portfolio state reflects reserved cash
+	p := engine.GetPortfolio("NVDA")
+	if p.ReservedCash <= 0 {
+		t.Fatalf("Expected ReservedCash > 0, got %.2f", p.ReservedCash)
+	}
+
+	// Order B: BUY 60 shares @ $100 = $6,000 of MSFT before A resolves.
+	// Remaining cash available = $10,000 - $6,030 = $3,970 < $6,030 (needed for B + $500 reserve).
+	ordB := &models.OrderIntent{
+		Symbol:         "MSFT",
+		Side:           models.SideBuy,
+		Qty:            60,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "buy-reserve-b",
+	}
+
+	decB := engine.CheckRisk(ordB)
+	if decB.Approved {
+		t.Fatalf("Order B must be REJECTED because pending Order A reserves cash")
+	}
+
+	resB, decB2 := engine.ReserveOrder(ordB)
+	if resB != nil || decB2.Approved {
+		t.Fatalf("ReserveOrder B must be REJECTED due to active cash reservations")
+	}
+}
+
+// 14. Test: Pending buy reservations block subsequent distinct buy order exceeding max symbol exposure
+func TestPendingBuyReservationsBlockSubsequentBuyExceedingSymbolExposure(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	cfg.MaxPositionPct = 0.10 // Max $10,000 for $100k equity
+	engine := NewEngine(100000.0, cfg)
+	engine.SetSlippageBuffer(0.0)
+
+	// Order A: BUY 60 shares @ $100 = $6,000 of AAPL
+	ordA := &models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            60,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "sym-reserve-a",
+	}
+	resA, decA := engine.ReserveOrder(ordA)
+	if resA == nil || !decA.Approved {
+		t.Fatalf("Order A must be approved")
+	}
+
+	// Order B: BUY 50 shares @ $100 = $5,000 of AAPL (Projected symbol exposure = $6k + $5k = $11k > $10k limit)
+	ordB := &models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            50,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "sym-reserve-b",
+	}
+
+	decB := engine.CheckRisk(ordB)
+	if decB.Approved {
+		t.Fatalf("Order B must be REJECTED because total AAPL exposure with reservations ($11,000) exceeds $10,000 max")
+	}
+}
+
+// 15. Test: Pending sell reservations block concurrent sell of the same shares (short selling prevention)
+func TestPendingSellReservationsBlockConcurrentSellOfSameShares(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	engine.SetAllowShorting(false)
+
+	// Seed confirmed long position: 10 shares of NVDA
+	_, _ = engine.ApplyFill(models.Fill{
+		FillID:        "fill-seed-nvda",
+		ClientOrderID: "seed-nvda",
+		Symbol:        "NVDA",
+		Side:          models.SideBuy,
+		Qty:           10,
+		Price:         100.0,
+		Timestamp:     time.Now().UTC(),
+	})
+
+	// Order A: SELL 7 shares of NVDA
+	ordA := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideSell,
+		Qty:            7,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "sell-reserve-a",
+	}
+	resA, decA := engine.ReserveOrder(ordA)
+	if resA == nil || !decA.Approved {
+		t.Fatalf("Order A must be approved")
+	}
+
+	// Order B: SELL 5 shares of NVDA before A resolves (Available sellable = 10 - 7 = 3 < 5)
+	ordB := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideSell,
+		Qty:            5,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "sell-reserve-b",
+	}
+	decB := engine.CheckRisk(ordB)
+	if decB.Approved {
+		t.Fatalf("Order B must be REJECTED because 7 shares are already reserved for selling in Order A")
+	}
+
+	// Order C: SELL 3 shares of NVDA -> Available = 3 -> Must be approved!
+	ordC := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideSell,
+		Qty:            3,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "sell-reserve-c",
+	}
+	decC := engine.CheckRisk(ordC)
+	if !decC.Approved {
+		t.Fatalf("Order C for exact remaining 3 shares must be approved, got: %v", decC.Reasons)
+	}
+}
+
+// 16. Test: Reservation release on cancellation or fill
+func TestReservationReleaseOnFillOrCancellation(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	cfg.MinCashReservePct = 0.05
+	cfg.MaxPositionPct = 0.80
+	cfg.MaxGrossExposurePct = 1.0
+	engine := NewEngine(10000.0, cfg)
+
+	// Order A: BUY 60 shares @ $100 = $6,000
+	ordA := &models.OrderIntent{
+		Symbol:         "NVDA",
+		Side:           models.SideBuy,
+		Qty:            60,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "rel-test-a",
+	}
+	_, _ = engine.ReserveOrder(ordA)
+
+	// Verify B is blocked
+	ordB := &models.OrderIntent{
+		Symbol:         "MSFT",
+		Side:           models.SideBuy,
+		Qty:            60,
+		ReferencePrice: 100.0,
+		ClientOrderID:  "rel-test-b",
+	}
+	if engine.CheckRisk(ordB).Approved {
+		t.Fatalf("B must be blocked while A is pending")
+	}
+
+	// Cancel Order A -> releases reservations
+	_ = engine.UpdateOrderStatus("rel-test-a", models.OrderStatusCancelled)
+
+	p := engine.GetPortfolio("NVDA")
+	if p.ReservedCash != 0 {
+		t.Fatalf("ReservedCash must be 0 after cancellation, got %.2f", p.ReservedCash)
+	}
+
+	// Now Order B passes!
+	decB := engine.CheckRisk(ordB)
+	if !decB.Approved {
+		t.Fatalf("Order B must be approved after Order A cancellation releases reservation, got: %v", decB.Reasons)
+	}
+}
+
+// 17. Test: Concurrent distinct orders cannot exceed cash limit (race test)
+func TestConcurrentDistinctOrdersCannotExceedCapacityRace(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	cfg.MinCashReservePct = 0.05 // Min $500 reserve on $10k equity
+	cfg.MaxPositionPct = 0.80
+	cfg.MaxGrossExposurePct = 1.0
+	engine := NewEngine(10000.0, cfg)
+
+	var wg sync.WaitGroup
+	approvedCount := 0
+	var mu sync.Mutex
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			ord := &models.OrderIntent{
+				Symbol:         fmt.Sprintf("SYM%d", idx),
+				Side:           models.SideBuy,
+				Qty:            60,
+				ReferencePrice: 100.0, // $6,000 notional each
+				ClientOrderID:  fmt.Sprintf("race-ord-%d", idx),
+			}
+			res, dec := engine.ReserveOrder(ord)
+			if res != nil && dec.Approved {
+				mu.Lock()
+				approvedCount++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Exactly 1 order of $6,000 can fit within $10,000 cash (since 2 orders require $12,000 > $9,500 available)
+	if approvedCount != 1 {
+		t.Fatalf("Expected exactly 1 order approved under concurrent race; got %d", approvedCount)
+	}
+}
+
+
 
 
 

@@ -95,14 +95,13 @@ class GoEngineClient:
             logger.debug(f"Go engine freeze failed: {e}")
         return None
 
-    def unfreeze(self, reason: str = "manual unfreeze", requested_by: str = "operator", reconciliation_run_id: str = "", override: bool = False) -> Optional[Dict[str, Any]]:
+    def unfreeze(self, reason: str = "manual unfreeze", requested_by: str = "operator", reconciliation_run_id: str = "") -> Optional[Dict[str, Any]]:
         """Disengage emergency kill switch with audit justification and safety validation."""
         try:
             payload = {
                 "reason": reason,
                 "requested_by": requested_by,
                 "reconciliation_run_id": reconciliation_run_id,
-                "override": override,
             }
             r = self.session.post(f"{self.base_url}/api/v1/risk/unfreeze", json=payload, timeout=self.timeout)
             if r.status_code in (200, 409):

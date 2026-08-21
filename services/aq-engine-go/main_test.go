@@ -330,7 +330,42 @@ func TestHTTPGatedUnfreezePreconditions(t *testing.T) {
 		t.Fatalf("Expected 409 Conflict when unfreezing without reconciliation, got %d", w2.Code)
 	}
 
-	// 3. Record clean reconciliation
+	// 2b. Attempting override=true without reconciliation must STILL be rejected -> 409 Conflict
+	unfreezeBodyOverride, _ := json.Marshal(map[string]interface{}{"reason": "attempt override", "override": true})
+	unfreezeReqOverride := httptest.NewRequest("POST", "/api/v1/risk/unfreeze", bytes.NewReader(unfreezeBodyOverride))
+	wOverride := httptest.NewRecorder()
+	mux.ServeHTTP(wOverride, unfreezeReqOverride)
+	if wOverride.Code != http.StatusConflict {
+		t.Fatalf("Expected 409 Conflict when attempting unfreeze override bypass, got %d", wOverride.Code)
+	}
+
+	// 2c. Record stale reconciliation -> must be rejected
+	reconciler.RecordRun("paper-sim", reconciliation.Diff{
+		TotalCount:  0,
+		HasCritical: false,
+		GeneratedAt: time.Now().UTC().Add(-2 * time.Hour),
+	})
+	wStale := httptest.NewRecorder()
+	unfreezeReqStale := httptest.NewRequest("POST", "/api/v1/risk/unfreeze", bytes.NewReader(unfreezeBody2))
+	mux.ServeHTTP(wStale, unfreezeReqStale)
+	if wStale.Code != http.StatusConflict {
+		t.Fatalf("Expected 409 Conflict for stale reconciliation, got %d", wStale.Code)
+	}
+
+	// 2d. Record reconciliation with critical discrepancies -> must be rejected
+	reconciler.RecordRun("paper-sim", reconciliation.Diff{
+		TotalCount:  2,
+		HasCritical: true,
+		GeneratedAt: time.Now().UTC(),
+	})
+	wCrit := httptest.NewRecorder()
+	unfreezeReqCrit := httptest.NewRequest("POST", "/api/v1/risk/unfreeze", bytes.NewReader(unfreezeBody2))
+	mux.ServeHTTP(wCrit, unfreezeReqCrit)
+	if wCrit.Code != http.StatusConflict {
+		t.Fatalf("Expected 409 Conflict for critical discrepancies, got %d", wCrit.Code)
+	}
+
+	// 3. Record clean fresh reconciliation
 	reconciler.RecordRun("paper-sim", reconciliation.Diff{
 		TotalCount:  0,
 		HasCritical: false,

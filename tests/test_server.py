@@ -127,7 +127,7 @@ def test_kill_and_unfreeze_endpoints():
     # Test unfreeze
     unfreeze_res = client.post(
         "/api/risk/unfreeze",
-        json={"reason": "test unfreeze", "requested_by": "tester", "override": True},
+        json={"reason": "test unfreeze", "requested_by": "tester"},
     )
     assert unfreeze_res.status_code in (200, 409)
 

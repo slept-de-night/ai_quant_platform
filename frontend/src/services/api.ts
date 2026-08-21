@@ -321,11 +321,11 @@ export const api = {
     return res.json();
   },
 
-  disengageKillSwitch: async (reason: string, requested_by?: string, reconciliation_run_id?: string, override?: boolean) => {
+  disengageKillSwitch: async (reason: string, requested_by?: string, reconciliation_run_id?: string) => {
     const res = await fetch(`${API_BASE}/risk/unfreeze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason, requested_by, reconciliation_run_id, override }),
+      body: JSON.stringify({ reason, requested_by, reconciliation_run_id }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {

@@ -1002,7 +1002,6 @@ class UnfreezeRequest(BaseModel):
     reason: str = "manual unfreeze"
     requested_by: Optional[str] = "operator"
     reconciliation_run_id: Optional[str] = ""
-    override: Optional[bool] = False
 
 
 @app.get("/api/readiness")
@@ -1062,11 +1061,10 @@ def disengage_kill_switch(req: Optional[UnfreezeRequest] = None):
     reason = req.reason if req and req.reason else "manual unfreeze"
     by = req.requested_by if req and req.requested_by else "operator"
     run_id = req.reconciliation_run_id if req and req.reconciliation_run_id else ""
-    override = req.override if req and req.override else False
 
-    res = go_client.unfreeze(reason=reason, requested_by=by, reconciliation_run_id=run_id, override=override)
+    res = go_client.unfreeze(reason=reason, requested_by=by, reconciliation_run_id=run_id)
     if res is not None:
-        if not res.get("resumed", True) and not override:
+        if not res.get("resumed", True):
             raise HTTPException(status_code=409, detail=res)
         return res
     return {

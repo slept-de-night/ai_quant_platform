@@ -28,7 +28,6 @@ export const UnfreezeModal: React.FC<UnfreezeModalProps> = ({
 }) => {
   const [reason, setReason] = useState('');
   const [operator, setOperator] = useState('lead-quant-operator');
-  const [override, setOverride] = useState(false);
   const [isRunningRecon, setIsRunningRecon] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -52,7 +51,7 @@ export const UnfreezeModal: React.FC<UnfreezeModalProps> = ({
   const handleUnfreeze = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!reason.trim()) {
-      setErrorMessage('A valid operational justification reason is strictly required by institutional compliance.');
+      setErrorMessage('A valid operational justification reason is required by execution safety policy.');
       return;
     }
 
@@ -61,7 +60,7 @@ export const UnfreezeModal: React.FC<UnfreezeModalProps> = ({
       setErrorMessage(null);
       setBlockingErrors([]);
 
-      await api.disengageKillSwitch(reason.trim(), operator.trim(), '', override);
+      await api.disengageKillSwitch(reason.trim(), operator.trim(), '');
       onSuccess();
       onClose();
     } catch (err: any) {
@@ -144,20 +143,24 @@ export const UnfreezeModal: React.FC<UnfreezeModalProps> = ({
                 )}
               </div>
 
-              {/* Active Broker */}
-              <div className="flex items-center justify-between p-2.5 rounded bg-card/40 border border-card-border">
+              {/* Active Broker with Separate Configured/Connected/Ready Status */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between p-2.5 rounded bg-card/40 border border-card-border gap-2">
                 <span className="text-slate-300 flex items-center gap-2">
-                  <ShieldCheck className="w-3.5 h-3.5 text-accent-cyan" /> Active Broker: {readiness?.active_broker || 'none'}
+                  <ShieldCheck className="w-3.5 h-3.5 text-accent-cyan" /> Active Broker: <span className="font-bold text-white">{readiness?.active_broker || 'none'}</span>
                 </span>
-                {readiness?.broker_ready ? (
-                  <span className="text-accent-emerald font-semibold flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> CONNECTED
+                <div className="flex items-center gap-2 text-[11px] font-mono">
+                  <span className="text-slate-400">
+                    Cfg: <span className={readiness?.broker_configured ? 'text-accent-emerald font-bold' : 'text-accent-rose font-bold'}>{readiness?.broker_configured ? 'YES' : 'NO'}</span>
                   </span>
-                ) : (
-                  <span className="text-accent-amber font-semibold flex items-center gap-1">
-                    <AlertTriangle className="w-3.5 h-3.5" /> NOT READY
+                  <span className="text-slate-500">|</span>
+                  <span className="text-slate-400">
+                    Conn: <span className={readiness?.broker_connected ? 'text-accent-emerald font-bold' : 'text-accent-amber font-bold'}>{readiness?.broker_connected ? 'YES' : 'UNKNOWN'}</span>
                   </span>
-                )}
+                  <span className="text-slate-500">|</span>
+                  <span className="text-slate-400">
+                    Ready: <span className={readiness?.broker_ready ? 'text-accent-emerald font-bold' : 'text-accent-amber font-bold'}>{readiness?.broker_ready ? 'YES' : 'NO'}</span>
+                  </span>
+                </div>
               </div>
 
               {/* Reconciliation Evidence */}
@@ -227,30 +230,16 @@ export const UnfreezeModal: React.FC<UnfreezeModalProps> = ({
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
               <span>Operational Justification / Audit Reason</span>
-              <span className="text-[11px] text-accent-rose font-normal">*Required by SEC / FINRA OMS Rule</span>
+              <span className="text-[11px] text-accent-rose font-normal">*Required by execution safety policy</span>
             </label>
             <textarea
               rows={2}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               className="w-full bg-card/60 border border-card-border rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-accent-cyan resize-none"
-              placeholder="e.g. Completed broker ledger audit; confirmed 0 discrepancies and approved resumption of trend trading strategy."
+              placeholder="e.g. Completed broker ledger audit; confirmed 0 discrepancies and approved resumption of trading execution."
               required
             />
-          </div>
-
-          {/* Compliance Override Checkbox */}
-          <div className="flex items-start gap-2 pt-1">
-            <input
-              type="checkbox"
-              id="compliance-override"
-              checked={override}
-              onChange={(e) => setOverride(e.target.checked)}
-              className="mt-0.5 rounded bg-background border-card-border text-accent-cyan focus:ring-0"
-            />
-            <label htmlFor="compliance-override" className="text-[11px] text-slate-400 leading-tight">
-              I acknowledge that I am manually attesting to the integrity of this trading posture and assume operational responsibility for clearing this kill switch.
-            </label>
           </div>
 
           {/* Actions */}

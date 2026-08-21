@@ -219,15 +219,21 @@ func main() {
 	case "alpaca":
 		if alpacaKey == "" || alpacaSecret == "" {
 			log.Printf("[BROKER WARNING] EXECUTION_BROKER=alpaca requested but credentials missing; operating in safe paper simulation fallback")
+			_ = brokerReg.SetActive("paper-simulation")
+			log.Printf("[BROKER POSTURE] Active broker set to default Paper Simulation Adapter")
+		} else {
+			_ = brokerReg.SetActive("alpaca-paper")
+			log.Printf("[BROKER POSTURE] Active broker set to Alpaca Paper Adapter")
 		}
-		_ = brokerReg.SetActive("alpaca-paper")
-		log.Printf("[BROKER POSTURE] Active broker set to Alpaca Paper Adapter")
 	case "webull":
 		if webullKey == "" || webullSecret == "" {
 			log.Printf("[BROKER WARNING] EXECUTION_BROKER=webull requested but credentials missing; operating in safe paper simulation fallback")
+			_ = brokerReg.SetActive("paper-simulation")
+			log.Printf("[BROKER POSTURE] Active broker set to default Paper Simulation Adapter")
+		} else {
+			_ = brokerReg.SetActive("webull-main")
+			log.Printf("[BROKER POSTURE] Active broker set to Webull Main Adapter")
 		}
-		_ = brokerReg.SetActive("webull-main")
-		log.Printf("[BROKER POSTURE] Active broker set to Webull Main Adapter")
 	default:
 		_ = brokerReg.SetActive("paper-simulation")
 		log.Printf("[BROKER POSTURE] Active broker set to default Paper Simulation Adapter")
@@ -494,7 +500,6 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			Reason              string `json:"reason"`
 			RequestedBy         string `json:"requested_by"`
 			ReconciliationRunID string `json:"reconciliation_run_id"`
-			Override            bool   `json:"override"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -525,7 +530,7 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			blockingReasons = append(blockingReasons, fmt.Sprintf("reconciliation_broker_mismatch_last_%s_active_%s", reconBroker, activeB.Name()))
 		}
 
-		if len(blockingReasons) > 0 && !req.Override {
+		if len(blockingReasons) > 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{

@@ -3,6 +3,7 @@ package reconciliation
 import (
 	"math"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -82,9 +83,14 @@ type Diff struct {
 }
 
 type Reconciler struct {
+	mu            sync.RWMutex
 	QtyTolerance  float64
 	CashTolerance float64
 	StaleAfter    time.Duration
+	MaxAge        time.Duration
+	LastRunAt     *time.Time
+	LastDiff      *Diff
+	LastBroker    string
 }
 
 func NewReconciler(qtyTolerance, cashTolerance float64, staleAfter time.Duration) *Reconciler {
@@ -92,7 +98,59 @@ func NewReconciler(qtyTolerance, cashTolerance float64, staleAfter time.Duration
 		QtyTolerance:  qtyTolerance,
 		CashTolerance: cashTolerance,
 		StaleAfter:    staleAfter,
+		MaxAge:        5 * time.Minute,
 	}
+}
+
+func (r *Reconciler) SetMaxAge(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d > 0 {
+		r.MaxAge = d
+	}
+}
+
+func (r *Reconciler) RecordRun(brokerName string, diff Diff) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := diff.GeneratedAt
+	r.LastRunAt = &t
+	r.LastDiff = &diff
+	r.LastBroker = brokerName
+}
+
+func (r *Reconciler) GetSummary(now time.Time) (status string, isFresh bool, lastRun *time.Time, critCount int, totCount int, broker string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.LastDiff == nil || r.LastRunAt == nil {
+		return "UNKNOWN", false, nil, 0, 0, ""
+	}
+
+	lastRun = r.LastRunAt
+	broker = r.LastBroker
+	critCount = 0
+	totCount = r.LastDiff.TotalCount
+	for _, d := range r.LastDiff.Discrepancies {
+		if d.Severity == SeverityCritical {
+			critCount++
+		}
+	}
+
+	age := now.Sub(*r.LastRunAt)
+	if r.MaxAge > 0 && age > r.MaxAge {
+		return "STALE", false, lastRun, critCount, totCount, broker
+	}
+
+	if r.LastDiff.HasCritical {
+		return "MISMATCH", true, lastRun, critCount, totCount, broker
+	}
+
+	if r.LastDiff.TotalCount == 0 {
+		return "CLEAN", true, lastRun, critCount, totCount, broker
+	}
+
+	return "WARNING", true, lastRun, critCount, totCount, broker
 }
 
 func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {

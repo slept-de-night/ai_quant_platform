@@ -26,15 +26,19 @@ const (
 )
 
 type JournalEvent struct {
-	EventID       string              `json:"event_id"`
-	Sequence      int64               `json:"sequence"`
-	Type          JournalEventType    `json:"type"`
-	Timestamp     time.Time           `json:"timestamp"`
-	Order         *models.OrderIntent `json:"order,omitempty"`
-	Fill          *models.Fill        `json:"fill,omitempty"`
-	ClientOrderID string              `json:"client_order_id,omitempty"`
-	BrokerOrderID string              `json:"broker_order_id,omitempty"`
-	Reason        string              `json:"reason,omitempty"`
+	SchemaVersion       string              `json:"schema_version,omitempty"`
+	EventID             string              `json:"event_id"`
+	Sequence            int64               `json:"sequence"`
+	Type                JournalEventType    `json:"type"`
+	Timestamp           time.Time           `json:"timestamp"`
+	Order               *models.OrderIntent `json:"order,omitempty"`
+	Fill                *models.Fill        `json:"fill,omitempty"`
+	ClientOrderID       string              `json:"client_order_id,omitempty"`
+	BrokerOrderID       string              `json:"broker_order_id,omitempty"`
+	Reason              string              `json:"reason,omitempty"`
+	RequestedBy         string              `json:"requested_by,omitempty"`
+	ReconciliationRunID string              `json:"reconciliation_run_id,omitempty"`
+	TraceID             string              `json:"trace_id,omitempty"`
 }
 
 type Journal struct {
@@ -75,6 +79,10 @@ func (j *Journal) Close() error {
 }
 
 func (j *Journal) RecordEvent(evtType JournalEventType, order *models.OrderIntent, fill *models.Fill, clientOrderID, brokerOrderID, reason string) error {
+	return j.RecordEventWithContext(evtType, order, fill, clientOrderID, brokerOrderID, reason, "", "", "")
+}
+
+func (j *Journal) RecordEventWithContext(evtType JournalEventType, order *models.OrderIntent, fill *models.Fill, clientOrderID, brokerOrderID, reason, requestedBy, reconciliationRunID, traceID string) error {
 	if j == nil || j.file == nil {
 		return nil
 	}
@@ -85,15 +93,19 @@ func (j *Journal) RecordEvent(evtType JournalEventType, order *models.OrderInten
 	j.seq++
 	now := time.Now().UTC()
 	evt := JournalEvent{
-		EventID:       fmt.Sprintf("evt-%d-%d", now.UnixNano(), j.seq),
-		Sequence:      j.seq,
-		Type:          evtType,
-		Timestamp:     now,
-		Order:         order,
-		Fill:          fill,
-		ClientOrderID: clientOrderID,
-		BrokerOrderID: brokerOrderID,
-		Reason:        reason,
+		SchemaVersion:       "1.0",
+		EventID:             fmt.Sprintf("evt-%d-%d", now.UnixNano(), j.seq),
+		Sequence:            j.seq,
+		Type:                evtType,
+		Timestamp:           now,
+		Order:               order,
+		Fill:                fill,
+		ClientOrderID:       clientOrderID,
+		BrokerOrderID:       brokerOrderID,
+		Reason:              reason,
+		RequestedBy:         requestedBy,
+		ReconciliationRunID: reconciliationRunID,
+		TraceID:             traceID,
 	}
 
 	bytes, err := json.Marshal(evt)

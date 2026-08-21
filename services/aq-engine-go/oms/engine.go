@@ -25,6 +25,11 @@ type Engine struct {
 	dailyOrders  int
 	lastResetDay string
 	isFrozen     bool
+	freezeReason string
+	frozenAt     *time.Time
+	frozenBy     string
+	frozenRunID  string
+	journalReady bool
 	journal      *Journal
 }
 
@@ -49,6 +54,7 @@ func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
 		positions:    make(map[string]models.Position),
 		lastResetDay: time.Now().UTC().Format("2006-01-02"),
 		isFrozen:     false,
+		journalReady: true,
 	}
 }
 
@@ -56,23 +62,59 @@ func (e *Engine) SetJournal(j *Journal) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.journal = j
+	e.journalReady = (j != nil)
+}
+
+func (e *Engine) SetJournalReady(ready bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.journalReady = ready
+}
+
+func (e *Engine) IsJournalReady() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.journalReady
 }
 
 func (e *Engine) Freeze() {
+	e.FreezeWithReason("emergency manual freeze", "operator", "")
+}
+
+func (e *Engine) FreezeWithReason(reason, by, runID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.isFrozen = true
 	e.portfolio.IsFrozen = true
+	e.freezeReason = reason
+	e.frozenBy = by
+	e.frozenRunID = runID
+	now := time.Now().UTC()
+	e.frozenAt = &now
 	metrics.DefaultRegistry.IncEngineFreeze()
-	_ = e.journal.RecordEvent(EventEngineFrozen, nil, nil, "", "", "")
+	_ = e.journal.RecordEvent(EventEngineFrozen, nil, nil, reason, by, runID)
 }
 
 func (e *Engine) Unfreeze() {
+	e.UnfreezeWithReason("manual unfreeze", "operator", "")
+}
+
+func (e *Engine) UnfreezeWithReason(reason, by, runID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.isFrozen = false
 	e.portfolio.IsFrozen = false
-	_ = e.journal.RecordEvent(EventEngineUnfrozen, nil, nil, "", "", "")
+	e.freezeReason = ""
+	e.frozenBy = ""
+	e.frozenRunID = ""
+	e.frozenAt = nil
+	_ = e.journal.RecordEvent(EventEngineUnfrozen, nil, nil, reason, by, runID)
+}
+
+func (e *Engine) GetFreezeInfo() (isFrozen bool, reason string, at *time.Time, by string, runID string) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.isFrozen, e.freezeReason, e.frozenAt, e.frozenBy, e.frozenRunID
 }
 
 func (e *Engine) IsFrozen() bool {

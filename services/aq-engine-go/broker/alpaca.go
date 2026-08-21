@@ -313,28 +313,61 @@ func (c *AlpacaAdapter) ListOrders() ([]BrokerOrder, error) {
 		return nil, fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	bodyBytes, _, err := c.doRequest(ctx, "GET", "/v2/orders?status=all&limit=100", nil)
-	if err != nil {
-		return nil, err
-	}
+	var allOrders []BrokerOrder
+	seen := make(map[string]bool)
+	limit := 500
+	maxPages := 10
+	var untilParam string
 
-	var resList []alpacaOrderResponse
-	if err := json.Unmarshal(bodyBytes, &resList); err != nil {
-		return nil, fmt.Errorf("failed to parse alpaca order list: %w", err)
-	}
+	for page := 0; page < maxPages; page++ {
+		endpoint := fmt.Sprintf("/v2/orders?status=all&limit=%d&direction=desc", limit)
+		if untilParam != "" {
+			endpoint += fmt.Sprintf("&until=%s", url.QueryEscape(untilParam))
+		}
 
-	orders := make([]BrokerOrder, len(resList))
-	for i, res := range resList {
-		bo, err := parseAlpacaOrder(res)
+		bodyBytes, _, err := c.doRequest(ctx, "GET", endpoint, nil)
 		if err != nil {
 			return nil, err
 		}
-		orders[i] = bo
+
+		var resList []alpacaOrderResponse
+		if err := json.Unmarshal(bodyBytes, &resList); err != nil {
+			return nil, fmt.Errorf("failed to parse alpaca order list: %w", err)
+		}
+
+		if len(resList) == 0 {
+			break
+		}
+
+		for _, res := range resList {
+			if res.ID != "" && seen[res.ID] {
+				continue
+			}
+			bo, err := parseAlpacaOrder(res)
+			if err != nil {
+				return nil, err
+			}
+			if res.ID != "" {
+				seen[res.ID] = true
+			}
+			allOrders = append(allOrders, bo)
+		}
+
+		if len(resList) < limit {
+			break
+		}
+
+		oldestCreatedAt := resList[len(resList)-1].CreatedAt
+		if oldestCreatedAt == "" || oldestCreatedAt == untilParam {
+			break
+		}
+		untilParam = oldestCreatedAt
 	}
-	return orders, nil
+
+	return allOrders, nil
 }
 
 type alpacaPositionResponse struct {

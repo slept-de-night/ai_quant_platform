@@ -474,3 +474,71 @@ func TestAlpacaHealthConnectivityRequiresProbe(t *testing.T) {
 		t.Fatalf("Expected connected/ready false after failed probe, got %+v", h4)
 	}
 }
+
+func TestAlpacaListOrdersPagination(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.HasPrefix(r.URL.Path, "/v2/orders") {
+			http.NotFound(w, r)
+			return
+		}
+		requestCount++
+		until := r.URL.Query().Get("until")
+		if until == "" {
+			// Page 1: 500 items (simulated with 500 items where oldest is 2026-08-21T07:00:00Z)
+			items := make([]alpacaOrderResponse, 500)
+			for i := 0; i < 500; i++ {
+				ts := "2026-08-21T08:00:00Z"
+				if i == 499 {
+					ts = "2026-08-21T07:00:00Z"
+				}
+				items[i] = alpacaOrderResponse{
+					ID:            fmt.Sprintf("page1-ord-%d", i),
+					ClientOrderID: fmt.Sprintf("c-page1-%d", i),
+					CreatedAt:     ts,
+					UpdatedAt:     ts,
+					Symbol:        "SPY",
+					Qty:           "1",
+					Status:        "filled",
+				}
+			}
+			json.NewEncoder(w).Encode(items)
+			return
+		} else if until == "2026-08-21T07:00:00Z" {
+			// Page 2: 5 items (less than limit=500, indicates end)
+			items := make([]alpacaOrderResponse, 5)
+			for i := 0; i < 5; i++ {
+				ts := "2026-08-21T06:00:00Z"
+				items[i] = alpacaOrderResponse{
+					ID:            fmt.Sprintf("page2-ord-%d", i),
+					ClientOrderID: fmt.Sprintf("c-page2-%d", i),
+					CreatedAt:     ts,
+					UpdatedAt:     ts,
+					Symbol:        "SPY",
+					Qty:           "1",
+					Status:        "filled",
+				}
+			}
+			json.NewEncoder(w).Encode(items)
+			return
+		}
+		json.NewEncoder(w).Encode([]alpacaOrderResponse{})
+	}))
+	defer server.Close()
+
+	client := NewAlpacaAdapter("alpaca-test", "test-key", "test-secret", true)
+	client.SetBaseURL(server.URL)
+
+	orders, err := client.ListOrders()
+	if err != nil {
+		t.Fatalf("ListOrders failed: %v", err)
+	}
+
+	if len(orders) != 505 {
+		t.Fatalf("Expected 505 orders across 2 pages, got %d", len(orders))
+	}
+	if requestCount != 2 {
+		t.Fatalf("Expected 2 paginated HTTP requests, got %d", requestCount)
+	}
+}

@@ -466,23 +466,23 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
           <div className="p-3 rounded bg-background border border-card-border">
             <div className="text-[10px] text-slate-400">Directional Side</div>
             <div className={`text-base font-bold mt-0.5 ${
-              cycleData?.signal?.side === 'BUY' ? 'text-accent-emerald' : cycleData?.signal?.side === 'SELL' ? 'text-accent-rose' : 'text-slate-300'
+              cycleData?.signal?.side === 'BUY' ? 'text-accent-emerald' : cycleData?.signal?.side === 'SELL' ? 'text-accent-rose' : cycleData?.signal?.side === 'HOLD' ? 'text-accent-cyan' : 'text-slate-400'
             }`}>
-              {cycleData?.signal?.side || 'HOLD'}
+              {cycleData?.signal?.side || '—'}
             </div>
           </div>
 
           <div className="p-3 rounded bg-background border border-card-border">
             <div className="text-[10px] text-slate-400">Signal Score</div>
             <div className="text-sm font-bold text-slate-100 mt-0.5">
-              {cycleData?.signal?.score !== undefined ? cycleData.signal.score.toFixed(3) : '0.000'}
+              {typeof cycleData?.signal?.score === 'number' ? cycleData.signal.score.toFixed(3) : '—'}
             </div>
           </div>
 
           <div className="p-3 rounded bg-background border border-card-border">
             <div className="text-[10px] text-slate-400">Reference Price</div>
             <div className="text-sm font-bold text-slate-100 mt-0.5">
-              ${cycleData?.signal?.reference_price?.toFixed(2) || '0.00'}
+              {typeof cycleData?.signal?.reference_price === 'number' ? `$${cycleData.signal.reference_price.toFixed(2)}` : '—'}
             </div>
           </div>
         </div>
@@ -494,7 +494,7 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
             <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${
               cycleData?.risk_decision?.approved ? 'bg-accent-emerald/20 text-accent-emerald' : 'bg-accent-rose/20 text-accent-rose'
             }`}>
-              {cycleData?.risk_decision?.approved ? 'RISK APPROVED' : 'GATED'}
+              {cycleData?.risk_decision ? (cycleData.risk_decision.approved ? 'RISK APPROVED' : 'GATED') : 'UNKNOWN'}
             </span>
           </div>
 
@@ -509,7 +509,7 @@ export const PaperTradingDeskView: React.FC<PaperTradingDeskViewProps> = ({
             <div className="p-3 rounded bg-background border border-card-border">
               <div className="text-[10px] text-slate-400">Risk Sized Quantity</div>
               <div className="text-sm font-bold text-accent-cyan mt-0.5">
-                {cycleData.risk_decision.order.qty} Shares (${cycleData.risk_decision.order.notional?.toFixed(2) || '0.00'})
+                {cycleData.risk_decision.order.qty != null ? `${cycleData.risk_decision.order.qty} Shares` : '—'} ({typeof cycleData.risk_decision.order.notional === 'number' ? `$${cycleData.risk_decision.order.notional.toFixed(2)}` : '—'})
               </div>
             </div>
           )}

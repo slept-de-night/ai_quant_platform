@@ -146,7 +146,7 @@ The platform includes a unified GitHub Actions workflow at `.github/workflows/ci
 
 ## Documentation Index
 
-- [Enterprise User Manual (`USER_MANUAL.md`)](file:///d:/Main/ai-quant/ai_quant_platform/USER_MANUAL.md): Complete operational guide for the UI workstation and analytical modules.
-- [Institutional Architecture Reference (`INSTITUTIONAL_ARCHITECTURE.md`)](file:///d:/Main/ai-quant/ai_quant_platform/INSTITUTIONAL_ARCHITECTURE.md): Deep-dive into OMS/EMS mechanics, reconciliation algorithms, and risk layers.
-- [AI Handoff & Knowledge Base (`AI_HANDOFF.md`)](file:///d:/Main/ai-quant/ai_quant_platform/AI_HANDOFF.md): Engineering context, codebase map, invariants, and roadmap for incoming developers/agents.
-- [Agent Governance & Spend Rules (`AGENT_GOVERNANCE.md`)](file:///d:/Main/ai-quant/ai_quant_platform/AGENT_GOVERNANCE.md): Rules for autonomous model evaluation and token budgets.
+- [Enterprise User Manual (`USER_MANUAL.md`)](USER_MANUAL.md): Complete operational guide for the UI workstation and analytical modules.
+- [Institutional Architecture Reference (`INSTITUTIONAL_ARCHITECTURE.md`)](INSTITUTIONAL_ARCHITECTURE.md): Deep-dive into OMS/EMS mechanics, reconciliation algorithms, and risk layers.
+- [AI Handoff & Knowledge Base (`AI_HANDOFF.md`)](AI_HANDOFF.md): Engineering context, codebase map, invariants, and roadmap for incoming developers/agents.
+- [Agent Governance & Spend Rules (`AGENT_GOVERNANCE.md`)](AGENT_GOVERNANCE.md): Rules for autonomous model evaluation and token budgets.

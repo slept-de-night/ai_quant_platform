@@ -49,6 +49,7 @@ class TaskNode(BaseModel):
     estimated_tokens: int = 5000
     status: TaskStatus = TaskStatus.PLANNED
     route: Optional[Any] = None
+    execution_decision: Optional[Any] = None
     depends_on: List[str] = Field(default_factory=list)
 
 

@@ -18,9 +18,9 @@ def test_research_plan_is_bounded_and_routed(tmp_path):
     assert len(nodes) == 13
     assert max(n.depth for n in nodes) == 2
     leaves=[n for n in nodes if n.depth==2]
-    assert all(n.route is not None for n in leaves)
-    assert any(n.route.model=='sol' for n in nodes if n.route)
-    assert any(n.route.model=='luna' for n in nodes if n.route)
+    assert all(n.execution_decision is not None for n in leaves)
+    assert any(n.execution_decision.kind.value == 'deterministic' for n in leaves)
+    assert any(n.execution_decision.kind.value == 'skip' for n in leaves)
 
 
 def test_spawn_depth_limit(tmp_path):

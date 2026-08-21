@@ -24,6 +24,12 @@ from .router import (
     ModelDecision,
     ModelRouter,
 )
+from .gate import (
+    ExecutionKind,
+    GateRequest,
+    ExecutionDecision,
+    AIExecutionGate,
+)
 from .orchestrator import (
     TaskOrchestrator,
     TaskRuntime,
@@ -57,6 +63,10 @@ __all__ = [
     "RouteRequest",
     "ModelDecision",
     "ModelRouter",
+    "ExecutionKind",
+    "GateRequest",
+    "ExecutionDecision",
+    "AIExecutionGate",
     "TaskOrchestrator",
     "TaskRuntime",
     "WorkerPool",

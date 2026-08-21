@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import uuid
 
 from ..core.config import Settings
+from .gate import AIExecutionGate, ExecutionDecision, ExecutionKind, GateRequest
 from .models import (
     ALLOWED_AGENT_ROLES,
     ALLOWED_TASK_TYPES,
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     estimated_tokens INTEGER NOT NULL,
     status TEXT NOT NULL,
     route_json TEXT,
-    depends_json TEXT NOT NULL DEFAULT '[]'
+    depends_json TEXT NOT NULL DEFAULT '[]',
+    decision_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runtime_tasks (
@@ -84,14 +86,22 @@ CREATE TABLE IF NOT EXISTS runtime_events (
 class TaskOrchestrator:
     """Bounded delegation control plane."""
 
-    def __init__(self, cfg: Settings, router: Optional[ModelRouter] = None):
+    def __init__(
+        self,
+        cfg: Settings,
+        router: Optional[ModelRouter] = None,
+        gate: Optional[AIExecutionGate] = None,
+    ):
         self.cfg = cfg
         self.router = router or ModelRouter(cfg)
+        self.gate = gate or AIExecutionGate(cfg, self.router)
         with sqlite3.connect(cfg.db_path) as con:
             con.executescript(ORCHESTRATOR_SCHEMA)
             cols = {r[1] for r in con.execute("PRAGMA table_info(agent_tasks)").fetchall()}
             if "depends_json" not in cols:
                 con.execute("ALTER TABLE agent_tasks ADD COLUMN depends_json TEXT NOT NULL DEFAULT '[]'")
+            if "decision_json" not in cols:
+                con.execute("ALTER TABLE agent_tasks ADD COLUMN decision_json TEXT")
 
     def _counts(self, root_id: str, parent_id: Optional[str] = None) -> Tuple[int, int, int]:
         with sqlite3.connect(self.cfg.db_path) as con:
@@ -142,8 +152,11 @@ class TaskOrchestrator:
         if tokens + request.estimated_tokens > self.cfg.agent_token_budget:
             raise PermissionError("run estimated-token budget reached")
 
-        req = RouteRequest(
+        gate_req = GateRequest(
             task_type=request.task_type,
+            symbol=parent.symbol,
+            agent_role=request.agent_role,
+            objective=request.objective,
             complexity=request.complexity,
             criticality=request.criticality,
             ambiguity=request.ambiguity,
@@ -154,18 +167,22 @@ class TaskOrchestrator:
             remaining_budget_ratio=max(
                 0.0, 1.0 - (tokens + request.estimated_tokens) / self.cfg.agent_token_budget
             ),
+            run_id=parent.root_id,
         )
-        route = self.router.decide(req)
-        if route.tier == "frontier":
+        decision = self.gate.evaluate(gate_req)
+        route = decision.model_route if decision.kind == ExecutionKind.AI else None
+
+        if route and route.tier == "frontier":
             with sqlite3.connect(self.cfg.db_path) as con:
                 high = con.execute(
                     "SELECT COUNT(*) FROM agent_tasks WHERE root_id=? AND route_json LIKE '%\"tier\":\"frontier\"%'",
                     (parent.root_id,),
                 ).fetchone()[0]
             if high >= self.cfg.agent_max_frontier_tasks and request.financial_impact < 0.85:
-                req.criticality = min(req.criticality, 0.55)
-                req.complexity = min(req.complexity, 0.60)
-                route = self.router.decide(req)
+                gate_req.criticality = min(gate_req.criticality, 0.55)
+                gate_req.complexity = min(gate_req.complexity, 0.60)
+                decision = self.gate.evaluate(gate_req)
+                route = decision.model_route if decision.kind == ExecutionKind.AI else None
 
         tid = str(uuid.uuid4())
         node = TaskNode(
@@ -179,6 +196,7 @@ class TaskOrchestrator:
             symbol=parent.symbol,
             estimated_tokens=request.estimated_tokens,
             route=route,
+            execution_decision=decision,
         )
         self._save(node)
         return node
@@ -186,7 +204,7 @@ class TaskOrchestrator:
     def _save(self, node: TaskNode):
         with sqlite3.connect(self.cfg.db_path) as con:
             con.execute(
-                "INSERT INTO agent_tasks(task_id, root_id, parent_id, created_at, depth, agent_role, task_type, objective, symbol, estimated_tokens, status, route_json, depends_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO agent_tasks(task_id, root_id, parent_id, created_at, depth, agent_role, task_type, objective, symbol, estimated_tokens, status, route_json, depends_json, decision_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node.task_id,
                     node.root_id,
@@ -201,6 +219,11 @@ class TaskOrchestrator:
                     node.status.value,
                     node.route.model_dump_json() if node.route else None,
                     json.dumps(node.depends_on),
+                    node.execution_decision.model_dump_json()
+                    if isinstance(node.execution_decision, ExecutionDecision)
+                    else json.dumps(node.execution_decision)
+                    if node.execution_decision
+                    else None,
                 ),
             )
 
@@ -382,7 +405,7 @@ class TaskOrchestrator:
     def tree(self, root_id: str) -> List[TaskNode]:
         with sqlite3.connect(self.cfg.db_path) as con:
             rows = con.execute(
-                "SELECT task_id, root_id, parent_id, depth, agent_role, task_type, objective, symbol, estimated_tokens, status, route_json, depends_json FROM agent_tasks WHERE root_id=? ORDER BY depth, created_at",
+                "SELECT task_id, root_id, parent_id, depth, agent_role, task_type, objective, symbol, estimated_tokens, status, route_json, depends_json, decision_json FROM agent_tasks WHERE root_id=? ORDER BY depth, created_at",
                 (root_id,),
             ).fetchall()
         return [
@@ -399,6 +422,7 @@ class TaskOrchestrator:
                 status=TaskStatus(r[9]),
                 route=ModelDecision.model_validate_json(r[10]) if r[10] else None,
                 depends_on=json.loads(r[11] or "[]"),
+                execution_decision=ExecutionDecision.model_validate_json(r[12]) if r[12] else None,
             )
             for r in rows
         ]

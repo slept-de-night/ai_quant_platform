@@ -10,6 +10,7 @@ from ..intelligence.models import ConflictBatch
 from ..intelligence.technical import analyze_technical
 from ..intelligence.trends import FREDClient, analyze_megatrend, analyze_microtrend
 from ..intelligence.web_research import OpenAIWebResearcher
+from .gate import AIExecutionGate, ExecutionDecision, ExecutionKind, GateRequest
 from .models import RuntimeTask
 from .router import ModelRouter, RouteRequest
 
@@ -17,11 +18,19 @@ from .router import ModelRouter, RouteRequest
 class ResearchRuntimeHandlers:
     """Executable handlers for the quantitative multi-agent research DAG."""
 
-    def __init__(self, cfg: Settings, data_loader: Callable[[str, int], Any], execute_ai: bool = False):
+    def __init__(
+        self,
+        cfg: Settings,
+        data_loader: Callable[[str, int], Any],
+        execute_ai: bool = False,
+        router: Optional[ModelRouter] = None,
+        gate: Optional[AIExecutionGate] = None,
+    ):
         self.cfg = cfg
         self.data_loader = data_loader
         self.execute_ai = execute_ai
-        self.router = ModelRouter(cfg)
+        self.router = router or ModelRouter(cfg)
+        self.gate = gate or AIExecutionGate(cfg, self.router)
 
     def handlers(self) -> Dict[str, Callable[[RuntimeTask, Dict[str, Dict[str, Any]]], Dict[str, Any]]]:
         return {
@@ -79,16 +88,12 @@ class ResearchRuntimeHandlers:
     def web_research(self, task: RuntimeTask, deps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         if task.agent_role == "evidence_manager":
             return self.digest(task, deps)
-        if not self.execute_ai or not self.cfg.openai_api_key or not task.symbol:
-            return {
-                "agent": task.agent_role,
-                "kind": "evidence",
-                "summary": "AI web research not executed in this runtime run.",
-                "evidence": {"overall_trust": 0.0, "verified_claim_ratio": 0.0, "claims": []},
-                "skipped": True,
-            }
-        req = RouteRequest(
+
+        gate_req = GateRequest(
             task_type="web_research",
+            symbol=task.symbol,
+            agent_role=task.agent_role,
+            objective=task.objective,
             complexity=0.68,
             criticality=0.78,
             ambiguity=0.70,
@@ -96,8 +101,32 @@ class ResearchRuntimeHandlers:
             needs_web=True,
             needs_tools=True,
             run_id=task.root_id,
+            force_refresh=self.execute_ai,
         )
-        route = self.router.decide(req)
+        decision = self.gate.evaluate(gate_req)
+
+        if not self.execute_ai or not self.cfg.openai_api_key or not task.symbol or decision.kind != ExecutionKind.AI:
+            return {
+                "agent": task.agent_role,
+                "kind": "evidence",
+                "summary": f"AI web research not executed in this runtime run ({decision.reason}).",
+                "evidence": {"overall_trust": 0.0, "verified_claim_ratio": 0.0, "claims": []},
+                "skipped": True,
+                "execution_decision": decision.model_dump(mode="json"),
+            }
+
+        route = decision.model_route or self.router.decide(
+            RouteRequest(
+                task_type="web_research",
+                complexity=0.68,
+                criticality=0.78,
+                ambiguity=0.70,
+                financial_impact=0.55,
+                needs_web=True,
+                needs_tools=True,
+                run_id=task.root_id,
+            )
+        )
         primary = {x.strip().lower() for x in self.cfg.extra_primary_domains.split(",") if x.strip()}
         trusted = {x.strip().lower() for x in self.cfg.extra_trusted_domains.split(",") if x.strip()}
         researcher = OpenAIWebResearcher(
@@ -110,6 +139,7 @@ class ResearchRuntimeHandlers:
             "kind": "evidence",
             "summary": summary,
             "route": route.model_dump(mode="json"),
+            "execution_decision": decision.model_dump(mode="json"),
             "evidence": report.model_dump(mode="json"),
             "skipped": False,
         }
@@ -121,14 +151,29 @@ class ResearchRuntimeHandlers:
             report = out.get("evidence", {})
             for claim in report.get("claims", []):
                 claims.append({"claim": claim.get("claim"), "verdict": claim.get("verdict")})
-        if len(claims) < 2:
-            return {"agent": task.agent_role, "kind": "contradiction", "conflicts": [], "note": "insufficient claims"}
-        if not self.execute_ai or not self.cfg.openai_api_key:
+
+        gate_req = GateRequest(
+            task_type="contradiction",
+            symbol=task.symbol,
+            agent_role=task.agent_role,
+            objective=task.objective,
+            claims_count=len(claims),
+            complexity=0.55,
+            criticality=0.82,
+            ambiguity=0.60,
+            financial_impact=0.55,
+            run_id=task.root_id,
+            force_refresh=self.execute_ai,
+        )
+        decision = self.gate.evaluate(gate_req)
+
+        if decision.kind != ExecutionKind.AI or not self.execute_ai or not self.cfg.openai_api_key:
             return {
                 "agent": task.agent_role,
                 "kind": "contradiction",
                 "conflicts": [],
-                "note": "AI contradiction pass skipped",
+                "note": f"AI contradiction pass skipped ({decision.reason})",
+                "execution_decision": decision.model_dump(mode="json"),
             }
 
         response, route = self.router.parse(
@@ -154,6 +199,7 @@ class ResearchRuntimeHandlers:
             "agent": task.agent_role,
             "kind": "contradiction",
             "route": route.model_dump(mode="json"),
+            "execution_decision": decision.model_dump(mode="json"),
             "conflicts": batch.model_dump(mode="json")["conflicts"] if batch else [],
         }
 

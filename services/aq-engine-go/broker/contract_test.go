@@ -23,11 +23,17 @@ func runBrokerContractSuite(t *testing.T, b BrokerAdapter) {
 			t.Errorf("Expected non-empty adapter Environment()")
 		}
 		health := b.GetHealth()
-		if health.Ready != b.IsConfigured() {
-			t.Errorf("Expected adapter health Ready=%v (matching IsConfigured), got %+v", b.IsConfigured(), health)
+		// Configured is a local property of credentials; Connected/Ready must
+		// NOT be inferred from configured alone (that would claim connectivity
+		// without an actual probe).
+		if health.Configured != b.IsConfigured() {
+			t.Errorf("Expected adapter health Configured=%v (matching IsConfigured), got %+v", b.IsConfigured(), health)
 		}
-		if health.Connected != b.IsConfigured() {
-			t.Errorf("Expected adapter health Connected=%v, got %+v", b.IsConfigured(), health)
+		if health.Connected && !b.IsConfigured() {
+			t.Errorf("Expected Connected=false for an unconfigured adapter, got %+v", health)
+		}
+		if health.Ready && !b.IsConfigured() {
+			t.Errorf("Expected Ready=false for an unconfigured adapter, got %+v", health)
 		}
 	})
 
@@ -146,6 +152,8 @@ func TestBrokerContractSuite_AlpacaAdapterOffline(t *testing.T) {
 				json.NewEncoder(w).Encode(alpacaOrderResponse{
 					ID:            "alpaca-contract-ord-1",
 					ClientOrderID: "contract-ord-1",
+					CreatedAt:     "2026-08-21T08:00:00Z",
+					UpdatedAt:     "2026-08-21T08:00:01Z",
 					Symbol:        "MSFT",
 					Qty:           "10",
 					FilledQty:     "0",
@@ -162,6 +170,8 @@ func TestBrokerContractSuite_AlpacaAdapterOffline(t *testing.T) {
 				json.NewEncoder(w).Encode(alpacaOrderResponse{
 					ID:            "alpaca-contract-ord-1",
 					ClientOrderID: "contract-ord-1",
+					CreatedAt:     "2026-08-21T08:00:00Z",
+					UpdatedAt:     "2026-08-21T08:00:01Z",
 					Symbol:        "MSFT",
 					Qty:           "10",
 					FilledQty:     "0",

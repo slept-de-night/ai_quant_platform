@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	"aq-engine-go/models"
@@ -17,12 +17,18 @@ import (
 )
 
 type AlpacaAdapter struct {
-	name      string
-	apiKey    string
-	secretKey string
-	baseURL   string
-	client    *http.Client
-	localMock *PaperAdapter
+	name        string
+	apiKey      string
+	secretKey   string
+	baseURL     string
+	environment Environment
+	client      *http.Client
+
+	mu        sync.Mutex
+	connected bool
+	ready     bool
+	probeMsg  string
+	lastProbe time.Time
 }
 
 func NewAlpacaPaperClient(apiKey, secretKey string) *AlpacaAdapter {
@@ -34,16 +40,20 @@ func NewAlpacaAdapter(name, apiKey, secretKey string, isPaper bool) *AlpacaAdapt
 	if !isPaper {
 		baseURL = "https://api.alpaca.markets"
 	}
+	environment := EnvPaper
+	if !isPaper {
+		environment = EnvLive
+	}
 	if name == "" {
 		name = "alpaca-paper"
 	}
 	return &AlpacaAdapter{
-		name:      name,
-		apiKey:    apiKey,
-		secretKey: secretKey,
-		baseURL:   baseURL,
-		client:    &http.Client{Timeout: 10 * time.Second},
-		localMock: NewPaperAdapter("alpaca-mock-paper", 100000.0),
+		name:        name,
+		apiKey:      apiKey,
+		secretKey:   secretKey,
+		baseURL:     baseURL,
+		environment: environment,
+		client:      &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -59,11 +69,11 @@ func (c *AlpacaAdapter) Kind() BrokerKind {
 	return BrokerKindAlpaca
 }
 
+// Environment reports the explicitly configured execution environment. It is
+// fixed at construction from the isPaper flag and MUST NOT be inferred from
+// the HTTP URL, so test servers that override the URL never relabel a venue.
 func (c *AlpacaAdapter) Environment() Environment {
-	if strings.Contains(c.baseURL, "paper") || strings.Contains(c.baseURL, "127.0.0.1") || strings.Contains(c.baseURL, "localhost") {
-		return EnvPaper
-	}
-	return EnvLive
+	return c.environment
 }
 
 func (c *AlpacaAdapter) IsConfigured() bool {
@@ -167,13 +177,13 @@ func parseAlpacaOrder(res alpacaOrderResponse) (BrokerOrder, error) {
 		limitPrice = p
 	}
 
-	createdAt, _ := time.Parse(time.RFC3339Nano, res.CreatedAt)
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
+	createdAt, err := time.Parse(time.RFC3339Nano, res.CreatedAt)
+	if err != nil {
+		return BrokerOrder{}, fmt.Errorf("failed to parse created_at '%s': %w", res.CreatedAt, err)
 	}
-	updatedAt, _ := time.Parse(time.RFC3339Nano, res.UpdatedAt)
-	if updatedAt.IsZero() {
-		updatedAt = createdAt
+	updatedAt, err := time.Parse(time.RFC3339Nano, res.UpdatedAt)
+	if err != nil {
+		return BrokerOrder{}, fmt.Errorf("failed to parse updated_at '%s': %w", res.UpdatedAt, err)
 	}
 
 	return BrokerOrder{
@@ -198,7 +208,7 @@ func parseAlpacaOrder(res alpacaOrderResponse) (BrokerOrder, error) {
 
 func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, error) {
 	if !c.IsConfigured() {
-		return c.localMock.SubmitOrder(order)
+		return nil, fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -235,7 +245,7 @@ func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, er
 
 func (c *AlpacaAdapter) CancelOrder(clientOrderID string) error {
 	if !c.IsConfigured() {
-		return c.localMock.CancelOrder(clientOrderID)
+		return fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -248,7 +258,7 @@ func (c *AlpacaAdapter) CancelOrder(clientOrderID string) error {
 
 func (c *AlpacaAdapter) GetOrder(clientOrderID string) (*BrokerOrder, error) {
 	if !c.IsConfigured() {
-		return c.localMock.GetOrder(clientOrderID)
+		return nil, fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -300,7 +310,7 @@ func (c *AlpacaAdapter) GetOrderByBrokerID(brokerOrderID string) (*BrokerOrder, 
 
 func (c *AlpacaAdapter) ListOrders() ([]BrokerOrder, error) {
 	if !c.IsConfigured() {
-		return c.localMock.ListOrders()
+		return nil, fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -337,7 +347,7 @@ type alpacaPositionResponse struct {
 
 func (c *AlpacaAdapter) ListPositions() ([]BrokerPosition, error) {
 	if !c.IsConfigured() {
-		return c.localMock.ListPositions()
+		return nil, fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -387,7 +397,7 @@ type alpacaAccountResponse struct {
 
 func (c *AlpacaAdapter) GetAccountState() (*AccountState, error) {
 	if !c.IsConfigured() {
-		return c.localMock.GetAccountState()
+		return nil, fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -425,26 +435,70 @@ func (c *AlpacaAdapter) GetAccountState() (*AccountState, error) {
 }
 
 func (c *AlpacaAdapter) GetHealth() Health {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	configured := c.IsConfigured()
-	msg := "Alpaca Broker API active"
 	if !configured {
-		msg = "Alpaca adapter unconfigured (credentials missing); not ready for broker execution"
+		return Health{
+			Configured:    false,
+			Ready:         false,
+			Connected:     false,
+			Broker:        BrokerKindAlpaca,
+			Name:          c.name,
+			Environment:   c.Environment(),
+			Message:       "Alpaca adapter unconfigured (credentials missing); not ready for broker execution",
+			LastCheckedAt: c.lastProbe,
+		}
+	}
+
+	msg := "Alpaca configured; connected/ready require a successful probe"
+	switch {
+	case c.connected && c.ready:
+		msg = "Alpaca Broker API active"
+	case c.probeMsg != "":
+		msg = c.probeMsg
 	}
 	return Health{
-		Ready:         configured,
-		Connected:     configured,
-		Configured:    configured,
+		Configured:    true,
+		Ready:         c.ready,
+		Connected:     c.connected,
 		Broker:        BrokerKindAlpaca,
 		Name:          c.name,
 		Environment:   c.Environment(),
 		Message:       msg,
-		LastCheckedAt: time.Now().UTC(),
+		LastCheckedAt: c.lastProbe,
 	}
+}
+
+// ProbeConnectivity performs a lightweight authorized account request and caches
+// the authoritative connectivity/readiness result. It is intended to be called
+// occasionally (e.g. at reconciliation or on operator request), never on every
+// readiness render.
+func (c *AlpacaAdapter) ProbeConnectivity(ctx context.Context) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("broker not configured: alpaca credentials missing")
+	}
+	_, _, err := c.doRequest(ctx, "GET", "/v2/account", nil)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastProbe = time.Now().UTC()
+	if err != nil {
+		c.connected = false
+		c.ready = false
+		c.probeMsg = "alpaca connectivity probe failed: " + err.Error()
+		return err
+	}
+	c.connected = true
+	c.ready = true
+	c.probeMsg = ""
+	return nil
 }
 
 func (c *AlpacaAdapter) GetBrokerSnapshot() (*reconciliation.BrokerState, error) {
 	if !c.IsConfigured() {
-		return c.localMock.GetBrokerSnapshot()
+		return nil, fmt.Errorf("broker not configured: alpaca credentials missing")
 	}
 
 	orders, err := c.ListOrders()
@@ -461,6 +515,13 @@ func (c *AlpacaAdapter) GetBrokerSnapshot() (*reconciliation.BrokerState, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get broker account state for snapshot: %w", err)
 	}
+
+	c.mu.Lock()
+	c.connected = true
+	c.ready = true
+	c.probeMsg = ""
+	c.lastProbe = time.Now().UTC()
+	c.mu.Unlock()
 
 	now := time.Now().UTC()
 	reconOrders := make(map[string]reconciliation.OrderState)

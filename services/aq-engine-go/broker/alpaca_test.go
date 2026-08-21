@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -107,6 +108,7 @@ func TestAlpacaGetOrderAndPartialFill(t *testing.T) {
 				ID:             "alp-fill-1",
 				ClientOrderID:  "client-partial-1",
 				CreatedAt:      "2026-08-21T08:00:00Z",
+				UpdatedAt:      "2026-08-21T08:00:01Z",
 				Symbol:         "QQQ",
 				Qty:            "20",
 				FilledQty:      "8",
@@ -149,6 +151,8 @@ func TestAlpacaListOrdersPositionsAccount(t *testing.T) {
 				{
 					ID:             "alp-1",
 					ClientOrderID:  "c-1",
+					CreatedAt:      "2026-08-21T08:00:00Z",
+					UpdatedAt:      "2026-08-21T08:00:01Z",
 					Symbol:         "NVDA",
 					Qty:            "10",
 					FilledQty:      "10",
@@ -297,5 +301,176 @@ func TestAlpacaTimeout(t *testing.T) {
 	_, err := client.GetAccountState()
 	if err == nil {
 		t.Fatalf("Expected timeout error, got nil")
+	}
+}
+
+func TestAlpacaUnconfiguredDoesNotMasquerade(t *testing.T) {
+	client := NewAlpacaAdapter("alpaca-paper", "", "", true)
+
+	order := &models.OrderIntent{
+		Symbol:        "NVDA",
+		Side:          models.SideBuy,
+		Qty:           10,
+		ClientOrderID: "unconfigured-1",
+	}
+
+	if _, err := client.SubmitOrder(order); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("SubmitOrder: expected broker not configured error, got %v", err)
+	}
+	if err := client.CancelOrder("unconfigured-1"); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("CancelOrder: expected broker not configured error, got %v", err)
+	}
+	if _, err := client.GetOrder("unconfigured-1"); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("GetOrder: expected broker not configured error, got %v", err)
+	}
+	if _, err := client.GetOrderByBrokerID("b-1"); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("GetOrderByBrokerID: expected broker not configured error, got %v", err)
+	}
+	if _, err := client.ListOrders(); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("ListOrders: expected broker not configured error, got %v", err)
+	}
+	if _, err := client.ListPositions(); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("ListPositions: expected broker not configured error, got %v", err)
+	}
+	if _, err := client.GetAccountState(); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("GetAccountState: expected broker not configured error, got %v", err)
+	}
+	if _, err := client.GetBrokerSnapshot(); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("GetBrokerSnapshot: expected broker not configured error, got %v", err)
+	}
+	if err := client.ProbeConnectivity(context.Background()); err == nil || !strings.Contains(err.Error(), "broker not configured") {
+		t.Fatalf("ProbeConnectivity: expected broker not configured error, got %v", err)
+	}
+}
+
+func TestAlpacaIdentityEnvironmentExplicit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	// A localhost test URL must NOT relabel a paper-configured venue.
+	paper := NewAlpacaAdapter("alpaca-test", "key", "secret", true)
+	paper.SetBaseURL(server.URL)
+	if paper.Environment() != EnvPaper {
+		t.Fatalf("Expected EnvPaper for isPaper=true despite localhost URL, got %s", paper.Environment())
+	}
+
+	live := NewAlpacaAdapter("alpaca-live", "key", "secret", false)
+	live.SetBaseURL(server.URL)
+	if live.Environment() != EnvLive {
+		t.Fatalf("Expected EnvLive for isPaper=false despite localhost URL, got %s", live.Environment())
+	}
+}
+
+func TestAlpacaStrictTimestampsRejected(t *testing.T) {
+	// Invalid created_at must error rather than fabricate time.Now().
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(alpacaOrderResponse{
+			ID:            "bad-created",
+			ClientOrderID: "c-created",
+			CreatedAt:     "not-a-timestamp",
+			UpdatedAt:     "2026-08-21T08:00:01Z",
+			Symbol:        "NVDA",
+			Qty:           "10",
+			FilledQty:     "0",
+			Side:          "buy",
+			Status:        "accepted",
+		})
+	}))
+	defer server.Close()
+
+	client := NewAlpacaAdapter("alpaca-test", "test-key", "test-secret", true)
+	client.SetBaseURL(server.URL)
+
+	_, err := client.SubmitOrder(&models.OrderIntent{Symbol: "NVDA", Side: models.SideBuy, Qty: 10, ClientOrderID: "c-created"})
+	if err == nil || !strings.Contains(err.Error(), "created_at") {
+		t.Fatalf("Expected created_at parse error, got %v", err)
+	}
+
+	// Invalid updated_at must error too.
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(alpacaOrderResponse{
+			ID:            "bad-updated",
+			ClientOrderID: "c-updated",
+			CreatedAt:     "2026-08-21T08:00:00Z",
+			UpdatedAt:     "garbage",
+			Symbol:        "NVDA",
+			Qty:           "10",
+			FilledQty:     "0",
+			Side:          "buy",
+			Status:        "accepted",
+		})
+	}))
+	defer server2.Close()
+
+	client2 := NewAlpacaAdapter("alpaca-test", "test-key", "test-secret", true)
+	client2.SetBaseURL(server2.URL)
+	_, err2 := client2.SubmitOrder(&models.OrderIntent{Symbol: "NVDA", Side: models.SideBuy, Qty: 10, ClientOrderID: "c-updated"})
+	if err2 == nil || !strings.Contains(err2.Error(), "updated_at") {
+		t.Fatalf("Expected updated_at parse error, got %v", err2)
+	}
+}
+
+func TestAlpacaHealthConnectivityRequiresProbe(t *testing.T) {
+	// Unconfigured: configured=false, connected=false, ready=false.
+	unconf := NewAlpacaAdapter("alpaca-paper", "", "", true)
+	h := unconf.GetHealth()
+	if h.Configured || h.Connected || h.Ready {
+		t.Fatalf("Unconfigured adapter must not report configured/connected/ready, got %+v", h)
+	}
+	if h.Environment != EnvPaper {
+		t.Fatalf("Expected EnvPaper, got %s", h.Environment)
+	}
+
+	// Configured but not yet probed: connected/ready must be false, not inferred from credentials.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v2/account" {
+			json.NewEncoder(w).Encode(alpacaAccountResponse{Cash: "0", Equity: "0", BuyingPower: "0", Currency: "USD"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := NewAlpacaAdapter("alpaca-test", "test-key", "test-secret", true)
+	client.SetBaseURL(server.URL)
+
+	h2 := client.GetHealth()
+	if !h2.Configured {
+		t.Fatalf("Expected Configured=true, got %+v", h2)
+	}
+	if h2.Connected || h2.Ready {
+		t.Fatalf("Connected/Ready must NOT be inferred from credentials alone, got %+v", h2)
+	}
+
+	// After a successful probe, connected/ready become true (cached probe).
+	if err := client.ProbeConnectivity(context.Background()); err != nil {
+		t.Fatalf("ProbeConnectivity failed: %v", err)
+	}
+	h3 := client.GetHealth()
+	if !h3.Connected || !h3.Ready {
+		t.Fatalf("Expected connected/ready after successful probe, got %+v", h3)
+	}
+	if h3.LastCheckedAt.IsZero() {
+		t.Fatalf("Expected LastCheckedAt set after probe")
+	}
+
+	// A failed probe flips connectivity off.
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusServiceUnavailable)
+	}))
+	defer failServer.Close()
+	client.SetBaseURL(failServer.URL)
+	if err := client.ProbeConnectivity(context.Background()); err == nil {
+		t.Fatalf("Expected probe to fail")
+	}
+	h4 := client.GetHealth()
+	if h4.Connected || h4.Ready {
+		t.Fatalf("Expected connected/ready false after failed probe, got %+v", h4)
 	}
 }

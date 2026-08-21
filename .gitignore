@@ -89,6 +89,7 @@ frontend/.vite/
 .next/
 .eslintcache
 .turbo/
+*.tsbuildinfo
 
 npm-debug.log*
 yarn-debug.log*

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"aq-engine-go/auth"
 	"aq-engine-go/broker"
 	"aq-engine-go/market"
 	"aq-engine-go/metrics"
@@ -114,7 +115,15 @@ func main() {
 	}
 
 	mux := setupRouter(engine, brokerReg, gateway)
-	handler := metrics.DefaultRegistry.Middleware(mux)
+
+	authToken := os.Getenv("AUTH_TOKEN")
+	if authToken == "" {
+		authToken = os.Getenv("ENGINE_API_KEY")
+	}
+	authRequired := os.Getenv("AUTH_REQUIRED") == "true"
+	authMw := auth.Middleware(authToken, authRequired)
+
+	handler := metrics.DefaultRegistry.Middleware(authMw(mux))
 
 	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
 	if err := http.ListenAndServe(":"+port, handler); err != nil {

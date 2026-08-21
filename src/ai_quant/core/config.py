@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     enable_go_engine: bool = True
     go_engine_url: str = "http://localhost:8080"
 
+    # Control-Plane Security
+    auth_token: Optional[str] = None
+    auth_required: bool = False
 
 
 settings = Settings()

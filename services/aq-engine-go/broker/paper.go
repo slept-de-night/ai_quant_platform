@@ -165,6 +165,7 @@ func (p *PaperAdapter) GetHealth() Health {
 	return Health{
 		Ready:         true,
 		Connected:     true,
+		Configured:    true,
 		Broker:        BrokerKindPaper,
 		Name:          p.name,
 		Environment:   EnvSimulation,

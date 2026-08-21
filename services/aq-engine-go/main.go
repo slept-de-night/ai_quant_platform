@@ -19,8 +19,136 @@ import (
 	"aq-engine-go/reconciliation"
 )
 
-
 var startTime = time.Now()
+
+func computeReadiness(engine *oms.Engine, brokerReg *broker.Registry, gateway *market.Gateway, reconciler *reconciliation.Reconciler) models.ReadinessReport {
+	now := time.Now().UTC()
+	var blockingReasons []string
+
+	// 1. Process Liveness
+	processStatus := "online"
+
+	// 2. Journal Readiness
+	journalReady := engine.IsJournalReady()
+	if !journalReady {
+		blockingReasons = append(blockingReasons, "journal_not_ready")
+	}
+
+	// 3. Broker Health & Connectivity
+	activeBroker, _ := brokerReg.GetActive()
+	activeBrokerName := "none"
+	brokerConfigured := false
+	brokerConnected := false
+	brokerReady := false
+	execMode := "SIMULATION"
+
+	if activeBroker != nil {
+		activeBrokerName = activeBroker.Name()
+		health := activeBroker.GetHealth()
+		brokerConfigured = health.Configured
+		brokerConnected = health.Connected
+		brokerReady = health.Ready
+		execMode = string(health.Environment)
+
+		if !brokerReady {
+			blockingReasons = append(blockingReasons, fmt.Sprintf("broker_%s_not_ready", activeBrokerName))
+		}
+		if !brokerConnected {
+			blockingReasons = append(blockingReasons, fmt.Sprintf("broker_%s_not_connected", activeBrokerName))
+		}
+	} else {
+		blockingReasons = append(blockingReasons, "no_active_broker_configured")
+	}
+
+	// 4. Reconciliation Status & Freshness
+	reconStatus, isFresh, lastRunAt, critCount, totCount, reconBroker := reconciler.GetSummary(now)
+	reconSummary := models.ReconciliationSummary{
+		Status:        reconStatus,
+		LastRunAt:     lastRunAt,
+		CriticalCount: critCount,
+		TotalCount:    totCount,
+		IsFresh:       isFresh,
+		MaxAgeSeconds: int(reconciler.MaxAge.Seconds()),
+		BrokerName:    reconBroker,
+	}
+
+	if reconStatus == "UNKNOWN" {
+		blockingReasons = append(blockingReasons, "reconciliation_not_run")
+	} else if reconStatus == "STALE" {
+		blockingReasons = append(blockingReasons, "reconciliation_stale")
+	} else if critCount > 0 || reconStatus == "MISMATCH" {
+		blockingReasons = append(blockingReasons, fmt.Sprintf("reconciliation_critical_discrepancies_%d", critCount))
+	}
+
+	// 5. Freeze & Kill Switch State
+	isFrozen, freezeReason, frozenAt, frozenBy, _ := engine.GetFreezeInfo()
+	if isFrozen {
+		if freezeReason == "" {
+			freezeReason = "emergency manual freeze"
+		}
+		blockingReasons = append(blockingReasons, fmt.Sprintf("oms_frozen: %s", freezeReason))
+	}
+
+	// 6. Market Data Freshness
+	allTicks := gateway.GetAllTicks()
+	marketStatus := "UNAVAILABLE"
+	var latestTickTime *time.Time
+	if len(allTicks) > 0 {
+		isDemo := false
+		for _, tick := range allTicks {
+			if tick.IsSimulated || tick.Source == "demo" {
+				isDemo = true
+			}
+			if latestTickTime == nil || tick.Timestamp.After(*latestTickTime) {
+				t := tick.Timestamp
+				latestTickTime = &t
+			}
+		}
+		if isDemo {
+			marketStatus = "DEMO"
+		} else {
+			marketStatus = "LIVE"
+		}
+	}
+	marketSummary := models.MarketDataSummary{
+		Status:    marketStatus,
+		UpdatedAt: latestTickTime,
+		TickCount: len(allTicks),
+	}
+
+	// 7. Trading Readiness
+	tradingReadiness := models.TradingReady
+	tradingReady := false
+
+	if isFrozen {
+		tradingReadiness = models.TradingFrozen
+	} else if len(blockingReasons) > 0 {
+		tradingReadiness = models.TradingNotReady
+	} else {
+		tradingReadiness = models.TradingReady
+		tradingReady = true
+	}
+
+	return models.ReadinessReport{
+		Process:          processStatus,
+		TradingReady:     tradingReady,
+		TradingReadiness: tradingReadiness,
+		ExecutionMode:    execMode,
+		ActiveBroker:     activeBrokerName,
+		BrokerConfigured: brokerConfigured,
+		BrokerConnected:  brokerConnected,
+		BrokerReady:      brokerReady,
+		JournalReady:     journalReady,
+		Reconciliation:   reconSummary,
+		IsFrozen:         isFrozen,
+		FreezeReason:     freezeReason,
+		FrozenAt:         frozenAt,
+		FrozenBy:         frozenBy,
+		MarketData:       marketSummary,
+		BlockingReasons:  blockingReasons,
+		Timestamp:        now,
+	}
+}
 
 func main() {
 	port := os.Getenv("PORT")
@@ -46,17 +174,29 @@ func main() {
 	engine := oms.NewEngine(initialEquity, riskCfg)
 	gateway := market.NewGateway()
 
+	reconcilerMaxAge := 300 * time.Second
+	if maxAgeStr := os.Getenv("RECONCILIATION_MAX_AGE_SECONDS"); maxAgeStr != "" {
+		if sec, err := strconv.Atoi(maxAgeStr); err == nil && sec > 0 {
+			reconcilerMaxAge = time.Duration(sec) * time.Second
+		}
+	}
+	reconciler := reconciliation.NewReconciler(0.001, 1.0, 5*time.Minute)
+	reconciler.SetMaxAge(reconcilerMaxAge)
+
 	journalPath := os.Getenv("OMS_JOURNAL_PATH")
 	if journalPath == "" {
 		journalPath = "data/oms_journal.jsonl"
 	}
 	journal, err := oms.NewJournal(journalPath)
 	if err != nil {
-		log.Printf("[JOURNAL WARNING] Could not initialize journal %s: %v", journalPath, err)
+		engine.SetJournalReady(false)
+		engine.FreezeWithReason(fmt.Sprintf("journal initialization failed: %v", err), "startup_journal", "")
+		log.Printf("[JOURNAL ERROR] Could not initialize journal %s: %v. OMS state: FROZEN", journalPath, err)
 	} else {
 		engine.SetJournal(journal)
 		replayed, err := journal.Replay(engine)
 		if err != nil {
+			engine.FreezeWithReason(fmt.Sprintf("journal replay failed: %v", err), "startup_journal", "")
 			log.Printf("[JOURNAL REPLAY ERROR] Replay failed: %v. Engine frozen.", err)
 		} else if replayed > 0 {
 			log.Printf("[JOURNAL REPLAY] Successfully recovered %d events from %s", replayed, journalPath)
@@ -124,23 +264,30 @@ func main() {
 		log.Printf("[MARKET GATEWAY] Production/Paper posture: No market ticks seeded (status: UNAVAILABLE)")
 	}
 
-	// Startup Reconciliation Gate
+	// Startup Reconciliation Gate: Fail closed if snapshot unavailable or critical discrepancy exists
 	activeB, _ := brokerReg.GetActive()
 	if activeB != nil {
-		if snap, err := activeB.GetBrokerSnapshot(); err == nil {
-			startReconciler := reconciliation.NewReconciler(0.001, 1.0, 5*time.Minute)
+		snap, err := activeB.GetBrokerSnapshot()
+		if err != nil {
+			engine.FreezeWithReason(fmt.Sprintf("startup broker snapshot unavailable: %v", err), "startup_gate", "")
+			log.Printf("[STARTUP GATE] Failed to obtain broker snapshot: %v. OMS state: FROZEN", err)
+		} else {
 			localSnap := engine.ConstructLocalSnapshot()
-			diff := startReconciler.Reconcile(localSnap, *snap)
+			diff := reconciler.Reconcile(localSnap, *snap)
+			reconciler.RecordRun(activeB.Name(), diff)
 			if diff.HasCritical {
-				engine.Freeze()
-				log.Printf("[STARTUP GATE] Critical reconciliation discrepancy detected. OMS initial state: FROZEN (%d discrepancies)", diff.TotalCount)
+				engine.FreezeWithReason(fmt.Sprintf("startup critical reconciliation discrepancy (%d critical)", diff.TotalCount), "startup_gate", "")
+				log.Printf("[STARTUP GATE] Critical reconciliation discrepancy detected. OMS state: FROZEN (%d discrepancies)", diff.TotalCount)
 			} else {
-				log.Printf("[STARTUP GATE] Startup reconciliation clean. OMS initial state: READY")
+				log.Printf("[STARTUP GATE] Startup reconciliation clean. OMS state: READY")
 			}
 		}
+	} else {
+		engine.FreezeWithReason("no active broker registered", "startup_gate", "")
+		log.Printf("[STARTUP GATE] No active broker registered. OMS state: FROZEN")
 	}
 
-	mux := setupRouter(engine, brokerReg, gateway)
+	mux := setupRouter(engine, brokerReg, gateway, reconciler)
 
 	authToken := os.Getenv("AUTH_TOKEN")
 	if authToken == "" {
@@ -157,7 +304,7 @@ func main() {
 	}
 }
 
-func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market.Gateway) *http.ServeMux {
+func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market.Gateway, reconciler *reconciliation.Reconciler) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 0. Observability & Operational Metrics
@@ -171,25 +318,48 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		json.NewEncoder(w).Encode(metrics.DefaultRegistry.Snapshot())
 	})
 
-	// 1. Health & Diagnostics
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		activeB, _ := brokerReg.GetActive()
-		activeHealth := broker.Health{}
-		if activeB != nil {
-			activeHealth = activeB.GetHealth()
-		}
-
+	// 1. Health & Liveness / Readiness Probes
+	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":         "healthy",
-			"engine":         "aq-engine-go",
-			"version":        "1.3.0-enterprise",
-			"uptime_seconds": time.Since(startTime).Seconds(),
-			"active_broker":  activeHealth.Name,
-			"broker_kind":    activeHealth.Broker,
-			"execution_mode": activeHealth.Environment,
-			"is_frozen":      engine.IsFrozen(),
-			"brokers":        brokerReg.List(),
+			"status":    "online",
+			"process":   "aq-engine-go",
+			"timestamp": time.Now().UTC(),
+		})
+	})
+
+	mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
+		report := computeReadiness(engine, brokerReg, gateway, reconciler)
+		w.Header().Set("Content-Type", "application/json")
+		if !report.TradingReady {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		json.NewEncoder(w).Encode(report)
+	})
+
+	mux.HandleFunc("GET /api/v1/readiness", func(w http.ResponseWriter, r *http.Request) {
+		report := computeReadiness(engine, brokerReg, gateway, reconciler)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(report)
+	})
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		report := computeReadiness(engine, brokerReg, gateway, reconciler)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":            report.Process,
+			"trading_ready":     report.TradingReady,
+			"trading_readiness": report.TradingReadiness,
+			"engine":            "aq-engine-go",
+			"version":           "1.3.0-enterprise",
+			"uptime_seconds":    time.Since(startTime).Seconds(),
+			"active_broker":     report.ActiveBroker,
+			"execution_mode":    report.ExecutionMode,
+			"is_frozen":         report.IsFrozen,
+			"freeze_reason":     report.FreezeReason,
+			"reconciliation":    report.Reconciliation,
+			"blocking_reasons":  report.BlockingReasons,
+			"brokers":           brokerReg.List(),
 		})
 	})
 
@@ -224,7 +394,6 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			return
 		}
 
-		// Dispatch to Active Pluggable Broker Adapter (Webull / Alpaca / Paper)
 		activeBroker, err := brokerReg.GetActive()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -296,23 +465,85 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 
 	// 7. Emergency Global Kill Switch
 	mux.HandleFunc("POST /api/v1/risk/kill", func(w http.ResponseWriter, r *http.Request) {
-		engine.Freeze()
+		var req struct {
+			Reason      string `json:"reason"`
+			RequestedBy string `json:"requested_by"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Reason == "" {
+			req.Reason = "Emergency Kill Switch ENGAGED by operator"
+		}
+		if req.RequestedBy == "" {
+			req.RequestedBy = "operator"
+		}
+
+		engine.FreezeWithReason(req.Reason, req.RequestedBy, "")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":    "frozen",
 			"is_frozen": true,
+			"reason":    req.Reason,
 			"message":   "Emergency Kill Switch ENGAGED: All new order submissions are BLOCKED",
 			"timestamp": time.Now().UTC(),
 		})
 	})
 
-	// 8. Resume / Unfreeze Execution
+	// 8. Safe Gated Resume / Unfreeze Execution
 	mux.HandleFunc("POST /api/v1/risk/unfreeze", func(w http.ResponseWriter, r *http.Request) {
-		engine.Unfreeze()
+		var req struct {
+			Reason      string `json:"reason"`
+			RequestedBy string `json:"requested_by"`
+			Override    bool   `json:"override"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		now := time.Now().UTC()
+		var blockingReasons []string
+
+		if strings.TrimSpace(req.Reason) == "" {
+			blockingReasons = append(blockingReasons, "unfreeze_reason_required")
+		}
+
+		if !engine.IsJournalReady() {
+			blockingReasons = append(blockingReasons, "journal_not_ready")
+		}
+
+		activeB, err := brokerReg.GetActive()
+		if err != nil || activeB == nil {
+			blockingReasons = append(blockingReasons, "no_active_broker_configured")
+		}
+
+		reconStatus, isFresh, _, critCount, _, _ := reconciler.GetSummary(now)
+		if reconStatus == "UNKNOWN" {
+			blockingReasons = append(blockingReasons, "reconciliation_never_run")
+		} else if !isFresh {
+			blockingReasons = append(blockingReasons, "reconciliation_evidence_stale")
+		} else if critCount > 0 {
+			blockingReasons = append(blockingReasons, fmt.Sprintf("critical_discrepancies_present_%d", critCount))
+		}
+
+		if len(blockingReasons) > 0 && !req.Override {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"resumed":          false,
+				"is_frozen":        true,
+				"blocking_reasons": blockingReasons,
+				"message":          "Execution resume BLOCKED: Safety preconditions not satisfied",
+			})
+			return
+		}
+
+		by := req.RequestedBy
+		if by == "" {
+			by = "local-operator"
+		}
+		engine.UnfreezeWithReason(req.Reason, by, "")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":    "active",
+			"resumed":   true,
 			"is_frozen": false,
+			"reason":    req.Reason,
 			"message":   "Execution RESUMED: Pre-trade risk gateway is ACTIVE",
 			"timestamp": time.Now().UTC(),
 		})
@@ -328,7 +559,6 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 	})
 
 	// 10. Automated Broker Reconciliation Engine
-	reconciler := reconciliation.NewReconciler(0.001, 1.0, 5*time.Minute)
 	mux.HandleFunc("POST /api/v1/reconciliation/run", func(w http.ResponseWriter, r *http.Request) {
 		localState := engine.ConstructLocalSnapshot()
 
@@ -345,9 +575,10 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		}
 
 		diff := reconciler.Reconcile(localState, *brokerSnapshot)
+		reconciler.RecordRun(activeB.Name(), diff)
 		metrics.DefaultRegistry.AddReconciliationDiscrepancies(uint64(diff.TotalCount))
 		if diff.HasCritical {
-			engine.Freeze()
+			engine.FreezeWithReason(fmt.Sprintf("critical reconciliation discrepancy (%d critical)", diff.TotalCount), "reconciliation_engine", "")
 			log.Printf("[RECONCILIATION ALERT] Critical discrepancy detected. OMS frozen in FROZEN_RECONCILIATION (%d discrepancies)", diff.TotalCount)
 		}
 
@@ -384,26 +615,19 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			Name string `json:"name"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			http.Error(w, "invalid request payload", http.StatusBadRequest)
 			return
 		}
-
 		if err := brokerReg.SetActive(req.Name); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
-		activeB, _ := brokerReg.GetActive()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status": "selected",
-			"active": activeB.Name(),
-			"health": activeB.GetHealth(),
+			"active": req.Name,
 		})
 	})
 
 	return mux
 }
-
-
-

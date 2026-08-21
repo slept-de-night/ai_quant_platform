@@ -7,27 +7,30 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"aq-engine-go/broker"
 	"aq-engine-go/market"
 	"aq-engine-go/models"
 	"aq-engine-go/oms"
+	"aq-engine-go/reconciliation"
 )
 
-func setupTestServer() (*http.ServeMux, *oms.Engine, *broker.Registry) {
+func setupTestServer() (*http.ServeMux, *oms.Engine, *broker.Registry, *reconciliation.Reconciler) {
 	riskCfg := models.DefaultRiskConfig()
 	engine := oms.NewEngine(100000.0, riskCfg)
 	gateway := market.NewGateway()
 	brokerReg := broker.NewRegistry()
 	paperAdapter := broker.NewPaperAdapter("paper-sim", 100000.0)
 	brokerReg.Register(paperAdapter)
+	reconciler := reconciliation.NewReconciler(0.001, 1.0, 5*time.Minute)
 
-	mux := setupRouter(engine, brokerReg, gateway)
-	return mux, engine, brokerReg
+	mux := setupRouter(engine, brokerReg, gateway, reconciler)
+	return mux, engine, brokerReg, reconciler
 }
 
 func TestHTTPRiskCheckPure(t *testing.T) {
-	mux, engine, _ := setupTestServer()
+	mux, engine, _, _ := setupTestServer()
 
 	order := models.OrderIntent{
 		Symbol:         "NVDA",
@@ -68,7 +71,7 @@ func TestHTTPRiskCheckPure(t *testing.T) {
 }
 
 func TestHTTPOderSubmitAndIdempotency(t *testing.T) {
-	mux, engine, _ := setupTestServer()
+	mux, engine, _, _ := setupTestServer()
 
 	order := models.OrderIntent{
 		Symbol:         "AAPL",
@@ -120,7 +123,7 @@ func TestHTTPOderSubmitAndIdempotency(t *testing.T) {
 }
 
 func TestHTTPKillSwitchAndReadOnlyAccess(t *testing.T) {
-	mux, engine, _ := setupTestServer()
+	mux, engine, _, _ := setupTestServer()
 
 	// 1. Engage kill switch
 	killReq := httptest.NewRequest("POST", "/api/v1/risk/kill", nil)
@@ -174,7 +177,7 @@ func TestHTTPKillSwitchAndReadOnlyAccess(t *testing.T) {
 }
 
 func TestHTTPBrokersHealthAndSwitch(t *testing.T) {
-	mux, _, brokerReg := setupTestServer()
+	mux, _, brokerReg, _ := setupTestServer()
 
 	// Register extra broker
 	alpaca := broker.NewAlpacaAdapter("alpaca-paper", "", "", true)
@@ -220,7 +223,7 @@ func TestHTTPBrokersHealthAndSwitch(t *testing.T) {
 }
 
 func TestHTTPMetricsEndpoints(t *testing.T) {
-	mux, _, _ := setupTestServer()
+	mux, _, _, _ := setupTestServer()
 
 	// 1. GET /metrics (Prometheus text)
 	promReq := httptest.NewRequest("GET", "/metrics", nil)
@@ -252,3 +255,97 @@ func TestHTTPMetricsEndpoints(t *testing.T) {
 	}
 }
 
+func TestHTTPReadinessLiveAndReady(t *testing.T) {
+	mux, engine, _, reconciler := setupTestServer()
+
+	// 1. GET /health/live -> 200 OK
+	liveReq := httptest.NewRequest("GET", "/health/live", nil)
+	liveW := httptest.NewRecorder()
+	mux.ServeHTTP(liveW, liveReq)
+	if liveW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 from /health/live, got %d", liveW.Code)
+	}
+
+	// 2. GET /health/ready before reconciliation run -> 503 Service Unavailable (reconciliation not run)
+	readyReq := httptest.NewRequest("GET", "/health/ready", nil)
+	readyW := httptest.NewRecorder()
+	mux.ServeHTTP(readyW, readyReq)
+	if readyW.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 before reconciliation, got %d", readyW.Code)
+	}
+
+	var report models.ReadinessReport
+	json.NewDecoder(readyW.Body).Decode(&report)
+	if report.TradingReady {
+		t.Fatalf("Expected trading_ready=false before reconciliation")
+	}
+
+	// 3. Record clean reconciliation run
+	reconciler.RecordRun("paper-sim", reconciliation.Diff{
+		Discrepancies: nil,
+		TotalCount:    0,
+		HasErrors:     false,
+		HasCritical:   false,
+		GeneratedAt:   time.Now().UTC(),
+	})
+
+	// 4. GET /health/ready now -> 200 OK
+	readyW2 := httptest.NewRecorder()
+	mux.ServeHTTP(readyW2, readyReq)
+	if readyW2.Code != http.StatusOK {
+		t.Fatalf("Expected 200 after clean reconciliation, got %d", readyW2.Code)
+	}
+
+	// 5. Freeze engine -> 503
+	engine.FreezeWithReason("risk alert", "tester", "")
+	readyW3 := httptest.NewRecorder()
+	mux.ServeHTTP(readyW3, readyReq)
+	if readyW3.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 while frozen, got %d", readyW3.Code)
+	}
+}
+
+func TestHTTPGatedUnfreezePreconditions(t *testing.T) {
+	mux, engine, _, reconciler := setupTestServer()
+
+	engine.FreezeWithReason("test freeze", "tester", "")
+
+	// 1. Unfreeze without reason -> 409 Conflict
+	unfreezeBody1, _ := json.Marshal(map[string]string{"reason": ""})
+	unfreezeReq1 := httptest.NewRequest("POST", "/api/v1/risk/unfreeze", bytes.NewReader(unfreezeBody1))
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, unfreezeReq1)
+
+	if w1.Code != http.StatusConflict {
+		t.Fatalf("Expected 409 Conflict when unfreezing without reason, got %d", w1.Code)
+	}
+
+	// 2. Unfreeze with reason but no reconciliation -> 409 Conflict
+	unfreezeBody2, _ := json.Marshal(map[string]string{"reason": "operator review done"})
+	unfreezeReq2 := httptest.NewRequest("POST", "/api/v1/risk/unfreeze", bytes.NewReader(unfreezeBody2))
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, unfreezeReq2)
+
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("Expected 409 Conflict when unfreezing without reconciliation, got %d", w2.Code)
+	}
+
+	// 3. Record clean reconciliation
+	reconciler.RecordRun("paper-sim", reconciliation.Diff{
+		TotalCount:  0,
+		HasCritical: false,
+		GeneratedAt: time.Now().UTC(),
+	})
+
+	// 4. Unfreeze with reason and clean reconciliation -> 200 OK
+	w3 := httptest.NewRecorder()
+	unfreezeReq3 := httptest.NewRequest("POST", "/api/v1/risk/unfreeze", bytes.NewReader(unfreezeBody2))
+	mux.ServeHTTP(w3, unfreezeReq3)
+
+	if w3.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK after clean reconciliation, got %d: %s", w3.Code, w3.Body.String())
+	}
+	if engine.IsFrozen() {
+		t.Fatalf("Expected engine to be unfrozen")
+	}
+}

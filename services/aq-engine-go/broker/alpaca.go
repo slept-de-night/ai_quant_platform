@@ -388,6 +388,7 @@ func (c *AlpacaAdapter) GetHealth() Health {
 	return Health{
 		Ready:         true,
 		Connected:     configured,
+		Configured:    configured,
 		Broker:        BrokerKindAlpaca,
 		Name:          c.name,
 		Environment:   c.Environment(),

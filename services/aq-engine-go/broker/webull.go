@@ -183,6 +183,7 @@ func (w *WebullAdapter) GetHealth() Health {
 	return Health{
 		Ready:         true,
 		Connected:     configured,
+		Configured:    configured,
 		Broker:        BrokerKindWebull,
 		Name:          w.name,
 		Environment:   w.Environment(),

@@ -102,6 +102,7 @@ type BrokerAccount = AccountState
 type Health struct {
 	Ready         bool        `json:"ready"`
 	Connected     bool        `json:"connected"`
+	Configured    bool        `json:"configured"`
 	Broker        BrokerKind  `json:"broker"`
 	Name          string      `json:"name"`
 	Environment   Environment `json:"environment"`

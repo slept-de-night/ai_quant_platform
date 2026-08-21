@@ -9,6 +9,7 @@ import (
 
 	"aq-engine-go/broker"
 	"aq-engine-go/models"
+	"aq-engine-go/reconciliation"
 )
 
 type Engine struct {
@@ -456,3 +457,46 @@ func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*bro
 	e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, models.OrderStatusAcknowledged, brokerOrderID)
 	return resp, decision, nil
 }
+
+// ConstructLocalSnapshot builds an authentic, non-fabricated snapshot of local OMS orders, confirmed positions, and cash state for reconciliation.
+func (e *Engine) ConstructLocalSnapshot() reconciliation.LocalState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	now := time.Now().UTC()
+	localOrders := make(map[string]reconciliation.OrderState)
+	for _, ord := range e.orderList {
+		localOrders[ord.ClientOrderID] = reconciliation.OrderState{
+			ClientOrderID: ord.ClientOrderID,
+			BrokerOrderID: ord.BrokerOrderID,
+			Symbol:        ord.Symbol,
+			Side:          string(ord.Side),
+			RequestedQty:  ord.Qty,
+			FilledQty:     ord.FilledQty,
+			Status:        string(ord.Status),
+			CreatedAt:     ord.CreatedAt,
+			UpdatedAt:     ord.UpdatedAt,
+		}
+	}
+
+	localPositions := make(map[string]reconciliation.PositionState)
+	for sym, pos := range e.positions {
+		if pos.Qty != 0 {
+			localPositions[sym] = reconciliation.PositionState{
+				Symbol:      pos.Symbol,
+				Qty:         pos.Qty,
+				MarketValue: pos.MarketValue,
+				CostBasis:   pos.CostBasis,
+			}
+		}
+	}
+
+	return reconciliation.LocalState{
+		Orders:    localOrders,
+		Positions: localPositions,
+		Cash:      e.portfolio.Cash,
+		Equity:    e.portfolio.Equity,
+		Timestamp: now,
+	}
+}
+

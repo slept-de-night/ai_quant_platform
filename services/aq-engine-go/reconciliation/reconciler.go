@@ -17,6 +17,15 @@ const (
 	DiscrepancyStaleLocalOrder    DiscrepancyType = "STALE_LOCAL_ORDER"
 )
 
+type Severity string
+
+const (
+	SeverityCritical Severity = "CRITICAL"
+	SeverityHigh     Severity = "HIGH"
+	SeverityMedium   Severity = "MEDIUM"
+	SeverityLow      Severity = "LOW"
+)
+
 type OrderState struct {
 	ClientOrderID string    `json:"client_order_id"`
 	BrokerOrderID string    `json:"broker_order_id,omitempty"`
@@ -54,6 +63,7 @@ type BrokerState struct {
 
 type Discrepancy struct {
 	Type          DiscrepancyType `json:"type"`
+	Severity      Severity        `json:"severity"`
 	Symbol        string          `json:"symbol,omitempty"`
 	ClientOrderID string          `json:"client_order_id,omitempty"`
 	BrokerOrderID string          `json:"broker_order_id,omitempty"`
@@ -67,6 +77,7 @@ type Diff struct {
 	Discrepancies []Discrepancy `json:"discrepancies"`
 	TotalCount    int           `json:"total_count"`
 	HasErrors     bool          `json:"has_errors"`
+	HasCritical   bool          `json:"has_critical"`
 	GeneratedAt   time.Time     `json:"generated_at"`
 }
 
@@ -96,6 +107,7 @@ func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {
 			if isWorkingStatus(localOrd.Status) {
 				discrepancies = append(discrepancies, Discrepancy{
 					Type:          DiscrepancyMissingBrokerOrder,
+					Severity:      SeverityHigh,
 					Symbol:        localOrd.Symbol,
 					ClientOrderID: clientID,
 					LocalValue:    localOrd.Status,
@@ -111,6 +123,7 @@ func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {
 		if localOrd.FilledQty != brokerOrd.FilledQty {
 			discrepancies = append(discrepancies, Discrepancy{
 				Type:          DiscrepancyFillQtyMismatch,
+				Severity:      SeverityHigh,
 				Symbol:        localOrd.Symbol,
 				ClientOrderID: clientID,
 				BrokerOrderID: brokerOrd.BrokerOrderID,
@@ -125,6 +138,7 @@ func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {
 		if r.isStale(localOrd, brokerOrd, now) {
 			discrepancies = append(discrepancies, Discrepancy{
 				Type:          DiscrepancyStaleLocalOrder,
+				Severity:      SeverityMedium,
 				Symbol:        localOrd.Symbol,
 				ClientOrderID: clientID,
 				BrokerOrderID: brokerOrd.BrokerOrderID,
@@ -141,6 +155,7 @@ func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {
 		if _, existsInLocal := local.Orders[clientID]; !existsInLocal {
 			discrepancies = append(discrepancies, Discrepancy{
 				Type:          DiscrepancyUnknownBrokerOrder,
+				Severity:      SeverityCritical,
 				Symbol:        brokerOrd.Symbol,
 				ClientOrderID: clientID,
 				BrokerOrderID: brokerOrd.BrokerOrderID,
@@ -168,6 +183,7 @@ func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {
 		if !within(localPos.Qty, brokerPos.Qty, r.QtyTolerance) {
 			discrepancies = append(discrepancies, Discrepancy{
 				Type:        DiscrepancyPositionMismatch,
+				Severity:    SeverityCritical,
 				Symbol:      sym,
 				LocalValue:  localPos.Qty,
 				BrokerValue: brokerPos.Qty,
@@ -181,6 +197,7 @@ func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {
 	if !within(local.Cash, broker.Cash, r.CashTolerance) {
 		discrepancies = append(discrepancies, Discrepancy{
 			Type:        DiscrepancyCashMismatch,
+			Severity:    SeverityHigh,
 			LocalValue:  local.Cash,
 			BrokerValue: broker.Cash,
 			Message:     "Cash balance mismatch between OMS and broker ledger",
@@ -188,10 +205,19 @@ func (r *Reconciler) Reconcile(local LocalState, broker BrokerState) Diff {
 		})
 	}
 
+	hasCritical := false
+	for _, d := range discrepancies {
+		if d.Severity == SeverityCritical {
+			hasCritical = true
+			break
+		}
+	}
+
 	return Diff{
 		Discrepancies: discrepancies,
 		TotalCount:    len(discrepancies),
 		HasErrors:     len(discrepancies) > 0,
+		HasCritical:   hasCritical,
 		GeneratedAt:   now,
 	}
 }
@@ -215,7 +241,7 @@ func within(a, b, tolerance float64) bool {
 
 func canonicalStatus(status string) string {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "PENDING", "APPROVED", "SUBMITTED", "ACCEPTED", "NEW", "PENDING_NEW", "ACCEPTED_FOR_BIDDING":
+	case "PENDING", "APPROVED", "SUBMITTED", "ACCEPTED", "NEW", "PENDING_NEW", "ACCEPTED_FOR_BIDDING", "SUBMITTING", "ACKNOWLEDGED":
 		return "OPEN"
 	case "PARTIALLY_FILLED", "PARTIAL_FILL", "PARTIAL":
 		return "PARTIALLY_FILLED"
@@ -223,7 +249,7 @@ func canonicalStatus(status string) string {
 		return "FILLED"
 	case "CANCELLED", "CANCELED", "DONE_FOR_DAY", "EXPIRED", "REPLACED":
 		return "CANCELLED"
-	case "REJECTED", "SUSPENDED", "STOPPED":
+	case "REJECTED", "SUSPENDED", "STOPPED", "SUBMIT_FAILED":
 		return "REJECTED"
 	default:
 		return strings.ToUpper(strings.TrimSpace(status))

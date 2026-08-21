@@ -58,6 +58,22 @@ func main() {
 	gateway.PublishTick(models.MarketTick{Symbol: "NVDA", Price: 128.50, Volume: 12000000, Timestamp: time.Now().UTC()})
 	gateway.PublishTick(models.MarketTick{Symbol: "QQQ", Price: 445.20, Volume: 3200000, Timestamp: time.Now().UTC()})
 
+	// Startup Reconciliation Gate
+	activeB, _ := brokerReg.GetActive()
+	if activeB != nil {
+		if snap, err := activeB.GetBrokerSnapshot(); err == nil {
+			startReconciler := reconciliation.NewReconciler(0.001, 1.0, 5*time.Minute)
+			localSnap := engine.ConstructLocalSnapshot()
+			diff := startReconciler.Reconcile(localSnap, *snap)
+			if diff.HasCritical {
+				engine.Freeze()
+				log.Printf("[STARTUP GATE] Critical reconciliation discrepancy detected. OMS initial state: FROZEN (%d discrepancies)", diff.TotalCount)
+			} else {
+				log.Printf("[STARTUP GATE] Startup reconciliation clean. OMS initial state: READY")
+			}
+		}
+	}
+
 	mux := setupRouter(engine, brokerReg, gateway)
 
 	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
@@ -228,31 +244,7 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 	// 10. Automated Broker Reconciliation Engine
 	reconciler := reconciliation.NewReconciler(0.001, 1.0, 5*time.Minute)
 	mux.HandleFunc("POST /api/v1/reconciliation/run", func(w http.ResponseWriter, r *http.Request) {
-		now := time.Now().UTC()
-		p := engine.GetPortfolio("")
-		
-		// Project local OMS state
-		localOrders := make(map[string]reconciliation.OrderState)
-		for _, ord := range engine.GetOrderHistory() {
-			localOrders[ord.ClientOrderID] = reconciliation.OrderState{
-				ClientOrderID: ord.ClientOrderID,
-				Symbol:        ord.Symbol,
-				Side:          string(ord.Side),
-				RequestedQty:  ord.Qty,
-				FilledQty:     ord.Qty,
-				Status:        string(ord.Status),
-				CreatedAt:     ord.CreatedAt,
-				UpdatedAt:     ord.CreatedAt,
-			}
-		}
-
-		localState := reconciliation.LocalState{
-			Orders:    localOrders,
-			Positions: make(map[string]reconciliation.PositionState),
-			Cash:      p.Cash,
-			Equity:    p.Equity,
-			Timestamp: now,
-		}
+		localState := engine.ConstructLocalSnapshot()
 
 		activeB, err := brokerReg.GetActive()
 		if err != nil {
@@ -267,6 +259,11 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		}
 
 		diff := reconciler.Reconcile(localState, *brokerSnapshot)
+		if diff.HasCritical {
+			engine.Freeze()
+			log.Printf("[RECONCILIATION ALERT] Critical discrepancy detected. OMS frozen in FROZEN_RECONCILIATION (%d discrepancies)", diff.TotalCount)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(diff)
 	})

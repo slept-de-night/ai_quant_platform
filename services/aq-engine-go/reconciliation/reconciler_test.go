@@ -141,4 +141,60 @@ func TestReconcilerDiscrepancies(t *testing.T) {
 	if !types[DiscrepancyCashMismatch] {
 		t.Errorf("Expected DiscrepancyCashMismatch")
 	}
+
+	if !diff.HasCritical {
+		t.Errorf("Expected diff.HasCritical to be true due to UnknownBrokerOrder and PositionMismatch")
+	}
 }
+
+func TestReconcilerSeverityAndCriticalGate(t *testing.T) {
+	now := time.Now().UTC()
+	reconciler := NewReconciler(0.001, 1.0, 5*time.Minute)
+
+	// Scenario A: Non-critical only (Cash mismatch only)
+	localNonCrit := LocalState{
+		Orders:    make(map[string]OrderState),
+		Positions: make(map[string]PositionState),
+		Cash:      100000.0,
+		Timestamp: now,
+	}
+	brokerNonCrit := BrokerState{
+		Orders:    make(map[string]OrderState),
+		Positions: make(map[string]PositionState),
+		Cash:      99000.0, // High severity, but not Critical
+		Timestamp: now,
+	}
+	diffNonCrit := reconciler.Reconcile(localNonCrit, brokerNonCrit)
+	if !diffNonCrit.HasErrors {
+		t.Fatalf("Expected discrepancies in non-critical diff")
+	}
+	if diffNonCrit.HasCritical {
+		t.Fatalf("Expected HasCritical=false for cash mismatch only")
+	}
+	if len(diffNonCrit.Discrepancies) != 1 || diffNonCrit.Discrepancies[0].Severity != SeverityHigh {
+		t.Fatalf("Expected 1 HIGH severity discrepancy, got %+v", diffNonCrit.Discrepancies)
+	}
+
+	// Scenario B: Critical discrepancy (Unknown broker order)
+	brokerCrit := BrokerState{
+		Orders: map[string]OrderState{
+			"ghost-order": {
+				ClientOrderID: "ghost-order",
+				Symbol:        "NVDA",
+				RequestedQty:  10,
+				Status:        "filled",
+			},
+		},
+		Positions: make(map[string]PositionState),
+		Cash:      100000.0,
+		Timestamp: now,
+	}
+	diffCrit := reconciler.Reconcile(localNonCrit, brokerCrit)
+	if !diffCrit.HasCritical {
+		t.Fatalf("Expected HasCritical=true for unknown broker order")
+	}
+	if diffCrit.Discrepancies[0].Severity != SeverityCritical {
+		t.Fatalf("Expected SeverityCritical, got %s", diffCrit.Discrepancies[0].Severity)
+	}
+}
+

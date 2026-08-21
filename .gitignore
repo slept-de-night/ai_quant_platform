@@ -152,8 +152,11 @@ cache/
 .Trashes
 Thumbs.db
 ehthumbs.db
-ehthumbs_vista.db
-desktop.ini
-$RECYCLE.BIN/
 .gemini/
 .claude/
+
+# ============================================
+# Local AI Inboxes / Scratchpads
+# ============================================
+chatgpt_inbox.md
+!chatgpt_inbox.example.md

@@ -169,17 +169,17 @@ run_full_platform.bat
 ### How to Run All Tests
 
 ```powershell
-# Go Test Suite (All 22 tests)
-$env:GOROOT = "C:\Users\2465975\go"; $env:PATH = "C:\Users\2465975\go\bin;" + $env:PATH
+# Go Engine Tests
 cd services/aq-engine-go
-go test -v -count=1 ./...
+go vet ./...
+go test -race -count=1 ./...
 
-# Python Test Suite (All 79 tests)
-$env:PYTHONPATH = "src"
-python -m pytest tests/ -q
+# Python Test Suite
+python -m pytest
 
 # Frontend Production Build
 cd frontend
+npm ci
 npm run build
 ```
 

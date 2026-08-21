@@ -225,7 +225,7 @@ The multi-agent research mesh coordinates specialized roles:
 
 ### Execution & Safety Endpoints
 - `POST /api/risk/kill`: Engage emergency kill switch (accepts `reason`, `requested_by`).
-- `POST /api/risk/unfreeze`: Gated execution resume (accepts `reason`, `requested_by`, `reconciliation_run_id`, `override`).
+- `POST /api/risk/unfreeze`: Gated execution resume (accepts `reason`, `requested_by`, `reconciliation_run_id`; strictly requires clean, fresh reconciliation without override bypass).
 - `POST /api/reconciliation/run`: Execute automated broker reconciliation.
 - `GET /api/brokers` & `POST /api/brokers/select`: List and select active broker.
 - `GET /api/orders/history`: Event-sourced order history with `trace_id` lineage.
@@ -233,14 +233,16 @@ The multi-agent research mesh coordinates specialized roles:
 ### Running Automated Test Suites
 
 ```bash
-# 1. Run Go Unit Tests (22 tests)
+# 1. Run Go Engine Tests
 cd services/aq-engine-go
-go test -v -count=1 ./...
+go vet ./...
+go test -race -count=1 ./...
 
-# 2. Run Python Pytest Suite (79 tests)
-python -m pytest tests/ -q
+# 2. Run Python Pytest Suite
+python -m pytest
 
 # 3. Run Frontend Production Build
 cd frontend
+npm ci
 npm run build
 ```

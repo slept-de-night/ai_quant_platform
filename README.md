@@ -105,26 +105,26 @@ run_doctor.bat
 
 ## Test Suites & CI Verification
 
-All platform components are covered by unit and contract test suites.
+All platform components are covered by automated unit and contract test suites.
 
 ### 1. Go Engine Tests
 ```powershell
-$env:GOROOT = "C:\Users\2465975\go"; $env:PATH = "C:\Users\2465975\go\bin;" + $env:PATH
 cd services/aq-engine-go
-go test -v -count=1 ./...
+go vet ./...
+go test -race -count=1 ./...
 ```
-*Passes 22 unit tests covering pure risk checks, order submission idempotency, kill switch state, readiness probes, broker contracts, journal replay, and reconciliation.*
+*Covers pure risk checks, order submission idempotency, kill switch state, readiness probes, broker contracts, journal replay, and reconciliation.*
 
 ### 2. Python Quantitative Tests
 ```powershell
-$env:PYTHONPATH = "src"
-python -m pytest tests/ -q
+python -m pytest
 ```
-*Passes 79 unit tests covering PIT runtime, agent DAG, alpha strategies, forensics, risk metrics, and API routes.*
+*Covers PIT runtime, agent DAG, alpha strategies, forensics, risk metrics, and API routes.*
 
 ### 3. Frontend Terminal Build
 ```powershell
 cd frontend
+npm ci
 npm run build
 ```
 *Generates a clean, type-checked production bundle in `src/ai_quant/web/static/`.*

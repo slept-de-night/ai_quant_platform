@@ -4,7 +4,7 @@ echo Starting AI Quant Platform (Go Engine + Web Server)
 echo ===================================================
 
 echo Starting Go Execution Engine in background...
-start "Go Execution Engine" cmd /k "set GOROOT=C:\Users\2465975\go&& set PATH=C:\Users\2465975\go\bin;%%PATH%%&& cd services\aq-engine-go&& go run main.go"
+start "Go Execution Engine" cmd /k "cd services\aq-engine-go && go run main.go"
 
 timeout /t 2 /nobreak >nul
 

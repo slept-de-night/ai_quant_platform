@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 from typing import Any, Callable, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -86,6 +86,24 @@ class SnapshotResolver:
         return QuantSnapshot.create(decision_time=decision_time, observations=all_obs)
 
 
+from enum import Enum
+import math
+
+
+class SourceState(str, Enum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    ERROR = "error"
+    NOT_CONFIGURED = "not_configured"
+    NOT_PIT_CAPABLE = "not_pit_capable"
+
+
+class SourceStatus(BaseModel):
+    status: SourceState
+    message: Optional[str] = None
+    fetched_at: Optional[datetime] = None
+
+
 class ResearchSnapshot(BaseModel):
     """Immutable per-run research snapshot bundling structured facts and raw market contexts.
 
@@ -93,6 +111,7 @@ class ResearchSnapshot(BaseModel):
     1. Market data and external sources are fetched once.
     2. All downstream deterministic handlers share identical point-in-time inputs.
     3. Facts are partitioned by category and queryable with zero lookahead.
+    4. Economic state hash is cleanly separated from run provenance identity.
     """
 
     snapshot_id: str
@@ -100,14 +119,39 @@ class ResearchSnapshot(BaseModel):
     symbol: str
     as_of: datetime
 
+    state_hash: str = ""
+    provenance_hash: str = ""
+    content_hash: str = ""
+
+    source_status: Dict[str, SourceStatus] = Field(default_factory=dict)
     dataset_versions: Dict[str, str] = Field(default_factory=dict)
     source_refs: Dict[str, str] = Field(default_factory=dict)
-    content_hash: str
 
     facts: List[ResearchFact] = Field(default_factory=list)
     market_bars: Dict[str, Any] = Field(default_factory=dict)
     sec_snapshot: Optional[Any] = None
     macro_snapshot: Optional[Any] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.state_hash:
+            hasher = hashlib.sha256()
+            hasher.update(self.symbol.encode("utf-8"))
+            for k, v in sorted(self.dataset_versions.items()):
+                hasher.update(f"{k}:{v}".encode("utf-8"))
+            for k, s in sorted(self.source_status.items()):
+                hasher.update(f"{k}:{s.status.value}".encode("utf-8"))
+            for f in sorted(self.facts, key=lambda x: (x.category, x.key, x.symbol or "", x.fact_id)):
+                hasher.update(f.semantic_hash.encode("utf-8"))
+            self.state_hash = hasher.hexdigest()
+
+        if not self.provenance_hash:
+            prov = hashlib.sha256(
+                f"{self.run_id}:{self.symbol}:{self.as_of.isoformat()}:{self.state_hash}".encode("utf-8")
+            ).hexdigest()
+            self.provenance_hash = prov
+
+        if not self.content_hash:
+            self.content_hash = self.provenance_hash
 
     def get_fact(self, category: str, key: str, symbol: Optional[str] = None) -> Optional[ResearchFact]:
         sym = symbol.upper().strip() if symbol is not None else None
@@ -147,7 +191,7 @@ class ResearchSnapshotBuilder:
 
     def __init__(
         self,
-        data_loader: Callable[[str, int], Any],
+        data_loader: Callable[..., Any],
         sec_client: Optional[Any] = None,
         fred_client: Optional[Any] = None,
     ):
@@ -164,32 +208,94 @@ class ResearchSnapshotBuilder:
     ) -> ResearchSnapshot:
         symbol = symbol.upper().strip()
         as_of = as_of or datetime.now(timezone.utc)
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
         benchmarks = [b.upper().strip() for b in (benchmarks or ["SPY", "QQQ", "TLT", "GLD"])]
 
         market_bars: Dict[str, Any] = {}
         facts: List[ResearchFact] = []
         dataset_versions: Dict[str, str] = {"market": "v1.0", "engine": "v1.3"}
         source_refs: Dict[str, str] = {}
+        source_status: Dict[str, SourceStatus] = {}
 
         # 1. Load target symbol bars
+        target_bars = None
         try:
-            target_bars = self.data_loader(symbol, 1000)
-            market_bars[symbol] = target_bars
-            source_refs[f"market:{symbol}"] = f"data_loader({symbol},1000)"
-        except Exception:
+            try:
+                target_bars = self.data_loader(symbol, limit=1000, as_of=as_of)
+            except TypeError:
+                target_bars = self.data_loader(symbol, 1000)
+
+            # Strictly enforce point-in-time: exclude bars with timestamp > as_of
+            if target_bars is not None and hasattr(target_bars, "index"):
+                try:
+                    if hasattr(target_bars.index, "tz") and target_bars.index.tz is None:
+                        # timezone naive index: compare with tz-naive as_of
+                        as_of_naive = as_of.replace(tzinfo=None)
+                        target_bars = target_bars[target_bars.index <= as_of_naive]
+                    else:
+                        target_bars = target_bars[target_bars.index <= as_of]
+                except Exception:
+                    pass
+
+            if target_bars is not None and hasattr(target_bars, "empty") and not target_bars.empty:
+                market_bars[symbol] = target_bars
+                source_refs[f"market:{symbol}"] = f"data_loader({symbol},1000,as_of={as_of.isoformat()})"
+                source_status[f"market:{symbol}"] = SourceStatus(
+                    status=SourceState.AVAILABLE,
+                    fetched_at=as_of,
+                )
+            else:
+                source_status[f"market:{symbol}"] = SourceStatus(
+                    status=SourceState.UNAVAILABLE,
+                    message=f"No market bars found on or before {as_of.isoformat()}",
+                    fetched_at=as_of,
+                )
+        except Exception as e:
             target_bars = None
+            source_status[f"market:{symbol}"] = SourceStatus(
+                status=SourceState.ERROR,
+                message=str(e),
+                fetched_at=as_of,
+            )
 
         # 2. Load benchmark bars
         for b in benchmarks:
             if b not in market_bars:
                 try:
-                    bars = self.data_loader(b, 1000)
-                    market_bars[b] = bars
-                    source_refs[f"market:{b}"] = f"data_loader({b},1000)"
-                except Exception:
-                    pass
+                    try:
+                        bars = self.data_loader(b, limit=1000, as_of=as_of)
+                    except TypeError:
+                        bars = self.data_loader(b, 1000)
 
-        # 3. Extract Market & Technical facts for target symbol
+                    if bars is not None and hasattr(bars, "index"):
+                        try:
+                            if hasattr(bars.index, "tz") and bars.index.tz is None:
+                                as_of_naive = as_of.replace(tzinfo=None)
+                                bars = bars[bars.index <= as_of_naive]
+                            else:
+                                bars = bars[bars.index <= as_of]
+                        except Exception:
+                            pass
+
+                    if bars is not None and hasattr(bars, "empty") and not bars.empty:
+                        market_bars[b] = bars
+                        source_refs[f"market:{b}"] = f"data_loader({b},1000)"
+                        source_status[f"market:{b}"] = SourceStatus(status=SourceState.AVAILABLE, fetched_at=as_of)
+                    else:
+                        source_status[f"market:{b}"] = SourceStatus(
+                            status=SourceState.UNAVAILABLE,
+                            message=f"No benchmark bars found on or before {as_of.isoformat()}",
+                            fetched_at=as_of,
+                        )
+                except Exception as e:
+                    source_status[f"market:{b}"] = SourceStatus(
+                        status=SourceState.ERROR,
+                        message=str(e),
+                        fetched_at=as_of,
+                    )
+
+        # 3. Extract Market & Technical facts for target symbol (with strict Missing != Zero checks)
         if target_bars is not None and hasattr(target_bars, "empty") and not target_bars.empty:
             last_bar = target_bars.iloc[-1]
             obs_time = getattr(last_bar, "name", as_of)
@@ -198,231 +304,309 @@ class ResearchSnapshotBuilder:
             elif obs_time.tzinfo is None:
                 obs_time = obs_time.replace(tzinfo=timezone.utc)
 
-            close_val = float(last_bar.get("close", 0.0))
-            vol_val = float(last_bar.get("volume", 0.0))
+            raw_close = last_bar.get("close")
+            if raw_close is not None:
+                try:
+                    close_val = float(raw_close)
+                    if math.isfinite(close_val):
+                        facts.append(
+                            ResearchFact(
+                                fact_id=f"mkt-{symbol}-close",
+                                symbol=symbol,
+                                category="market",
+                                key="close",
+                                value=close_val,
+                                observed_at=obs_time,
+                                known_at=obs_time,
+                                as_of=as_of,
+                                source_type="market_data",
+                                source_id=symbol,
+                            )
+                        )
+                except (ValueError, TypeError):
+                    pass
 
-            facts.append(
-                ResearchFact(
-                    fact_id=f"mkt-{symbol}-close",
-                    symbol=symbol,
-                    category="market",
-                    key="close",
-                    value=close_val,
-                    observed_at=obs_time,
-                    known_at=obs_time,
-                    as_of=as_of,
-                    source_type="market_data",
-                    source_id=symbol,
-                )
-            )
-            facts.append(
-                ResearchFact(
-                    fact_id=f"mkt-{symbol}-volume",
-                    symbol=symbol,
-                    category="market",
-                    key="volume",
-                    value=vol_val,
-                    observed_at=obs_time,
-                    known_at=obs_time,
-                    as_of=as_of,
-                    source_type="market_data",
-                    source_id=symbol,
-                )
-            )
+            raw_vol = last_bar.get("volume")
+            if raw_vol is not None:
+                try:
+                    vol_val = float(raw_vol)
+                    if math.isfinite(vol_val):
+                        facts.append(
+                            ResearchFact(
+                                fact_id=f"mkt-{symbol}-volume",
+                                symbol=symbol,
+                                category="market",
+                                key="volume",
+                                value=vol_val,
+                                observed_at=obs_time,
+                                known_at=obs_time,
+                                as_of=as_of,
+                                source_type="market_data",
+                                source_id=symbol,
+                            )
+                        )
+                except (ValueError, TypeError):
+                    pass
 
             # Compute technical analysis
             try:
                 from ..intelligence.technical import analyze_technical
                 tech_view = analyze_technical(target_bars)
-                facts.append(
-                    ResearchFact(
-                        fact_id=f"tech-{symbol}-directional-score",
-                        symbol=symbol,
-                        category="technical",
-                        key="directional_score",
-                        value=tech_view.score,
-                        observed_at=obs_time,
-                        known_at=obs_time,
-                        as_of=as_of,
-                        source_type="derived_technical",
-                        confidence=tech_view.confidence,
+                if tech_view.score is not None:
+                    try:
+                        score_val = float(tech_view.score)
+                        if math.isfinite(score_val):
+                            facts.append(
+                                ResearchFact(
+                                    fact_id=f"tech-{symbol}-directional-score",
+                                    symbol=symbol,
+                                    category="technical",
+                                    key="directional_score",
+                                    value=score_val,
+                                    observed_at=obs_time,
+                                    known_at=obs_time,
+                                    as_of=as_of,
+                                    source_type="derived_technical",
+                                    confidence=tech_view.confidence,
+                                )
+                            )
+                    except (ValueError, TypeError):
+                        pass
+                if tech_view.trend:
+                    facts.append(
+                        ResearchFact(
+                            fact_id=f"tech-{symbol}-trend",
+                            symbol=symbol,
+                            category="technical",
+                            key="trend",
+                            value=tech_view.trend,
+                            observed_at=obs_time,
+                            known_at=obs_time,
+                            as_of=as_of,
+                            source_type="derived_technical",
+                            confidence=tech_view.confidence,
+                        )
                     )
-                )
-                facts.append(
-                    ResearchFact(
-                        fact_id=f"tech-{symbol}-trend",
-                        symbol=symbol,
-                        category="technical",
-                        key="trend",
-                        value=tech_view.trend,
-                        observed_at=obs_time,
-                        known_at=obs_time,
-                        as_of=as_of,
-                        source_type="derived_technical",
-                        confidence=tech_view.confidence,
-                    )
-                )
             except Exception:
                 pass
 
-        # 4. Extract SEC Fundamental facts
+        # 4. Extract SEC Fundamental facts (with strict PIT filing availability)
         sec_snapshot = None
-        if self.sec_client:
+        if self.sec_client is None:
+            source_status["sec"] = SourceStatus(status=SourceState.NOT_CONFIGURED)
+        else:
             try:
-                sec_snapshot = self.sec_client.snapshot(symbol)
+                try:
+                    sec_snapshot = self.sec_client.snapshot(symbol, as_of=as_of)
+                except TypeError:
+                    sec_snapshot = self.sec_client.snapshot(symbol)
+
                 dataset_versions["sec"] = "sec-xbrl-v1"
                 source_refs["fundamental:sec"] = f"sec_facts({symbol})"
-                if hasattr(sec_snapshot, "annual_reports") and sec_snapshot.annual_reports:
-                    latest_report = sec_snapshot.annual_reports[-1]
-                    try:
-                        rep_date = datetime.strptime(latest_report.end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                    except Exception:
-                        rep_date = as_of
-                    facts.append(
-                        ResearchFact(
-                            fact_id=f"fund-{symbol}-revenue-growth-yoy",
-                            symbol=symbol,
-                            category="fundamental",
-                            key="revenue_growth_yoy",
-                            value=latest_report.revenue_growth_yoy,
-                            observed_at=rep_date,
-                            known_at=rep_date,
-                            as_of=as_of,
-                            source_type="sec_edgar",
-                            source_id=f"CIK-{getattr(sec_snapshot, 'cik', '')}",
-                        )
-                    )
-                    facts.append(
-                        ResearchFact(
-                            fact_id=f"fund-{symbol}-net-margin",
-                            symbol=symbol,
-                            category="fundamental",
-                            key="net_margin",
-                            value=latest_report.net_margin,
-                            observed_at=rep_date,
-                            known_at=rep_date,
-                            as_of=as_of,
-                            source_type="sec_edgar",
-                            source_id=f"CIK-{getattr(sec_snapshot, 'cik', '')}",
-                        )
-                    )
-            except Exception:
-                sec_snapshot = None
 
-        # 5. Extract FRED Macro facts
+                reports = getattr(sec_snapshot, "annual_reports", None) or []
+                eligible_reports = []
+                for rep in reports:
+                    filing_dt = None
+                    for attr in ("filing_date", "filed_at", "acceptance_datetime", "known_at"):
+                        val = getattr(rep, attr, None)
+                        if val:
+                            if isinstance(val, datetime):
+                                filing_dt = val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+                            elif isinstance(val, str):
+                                try:
+                                    filing_dt = datetime.fromisoformat(val).replace(tzinfo=timezone.utc)
+                                except Exception:
+                                    try:
+                                        filing_dt = datetime.strptime(val[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                                    except Exception:
+                                        pass
+                            break
+
+                    if filing_dt is None:
+                        end_val = getattr(rep, "end_date", None)
+                        if end_val:
+                            try:
+                                filing_dt = datetime.strptime(str(end_val)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                            except Exception:
+                                pass
+
+                    if filing_dt is not None:
+                        if filing_dt <= as_of:
+                            eligible_reports.append((filing_dt, rep))
+
+                if eligible_reports:
+                    # Sort by filing date ascending, select latest available on or before as_of
+                    eligible_reports.sort(key=lambda x: x[0])
+                    filing_dt, latest_report = eligible_reports[-1]
+
+                    end_date_str = getattr(latest_report, "end_date", None)
+                    if end_date_str:
+                        try:
+                            rep_obs_date = datetime.strptime(str(end_date_str)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                        except Exception:
+                            rep_obs_date = filing_dt
+                    else:
+                        rep_obs_date = filing_dt
+
+                    rev_growth = getattr(latest_report, "revenue_growth_yoy", None)
+                    if rev_growth is not None:
+                        try:
+                            rg_val = float(rev_growth)
+                            if math.isfinite(rg_val):
+                                facts.append(
+                                    ResearchFact(
+                                        fact_id=f"fund-{symbol}-revenue-growth-yoy",
+                                        symbol=symbol,
+                                        category="fundamental",
+                                        key="revenue_growth_yoy",
+                                        value=rg_val,
+                                        observed_at=rep_obs_date,
+                                        known_at=filing_dt,
+                                        as_of=as_of,
+                                        source_type="sec_edgar",
+                                        source_id=f"CIK-{getattr(sec_snapshot, 'cik', '')}",
+                                    )
+                                )
+                        except (ValueError, TypeError):
+                            pass
+
+                    net_margin = getattr(latest_report, "net_margin", None)
+                    if net_margin is not None:
+                        try:
+                            nm_val = float(net_margin)
+                            if math.isfinite(nm_val):
+                                facts.append(
+                                    ResearchFact(
+                                        fact_id=f"fund-{symbol}-net-margin",
+                                        symbol=symbol,
+                                        category="fundamental",
+                                        key="net_margin",
+                                        value=nm_val,
+                                        observed_at=rep_obs_date,
+                                        known_at=filing_dt,
+                                        as_of=as_of,
+                                        source_type="sec_edgar",
+                                        source_id=f"CIK-{getattr(sec_snapshot, 'cik', '')}",
+                                    )
+                                )
+                        except (ValueError, TypeError):
+                            pass
+
+                    source_status["sec"] = SourceStatus(
+                        status=SourceState.AVAILABLE,
+                        fetched_at=as_of,
+                    )
+                else:
+                    source_status["sec"] = SourceStatus(
+                        status=SourceState.UNAVAILABLE,
+                        message=f"No SEC filings available on or before {as_of.isoformat()}",
+                        fetched_at=as_of,
+                    )
+            except Exception as e:
+                sec_snapshot = None
+                source_status["sec"] = SourceStatus(
+                    status=SourceState.ERROR,
+                    message=str(e),
+                    fetched_at=as_of,
+                )
+
+        # 5. Extract FRED Macro facts (with vintage / PIT awareness)
         macro_snapshot = None
-        if self.fred_client:
+        if self.fred_client is None:
+            source_status["macro:fred"] = SourceStatus(status=SourceState.NOT_CONFIGURED)
+        else:
             try:
-                macro_snapshot = self.fred_client.snapshot()
-                dataset_versions["macro"] = "fred-v1"
-                source_refs["macro:fred"] = "fred_snapshot()"
-                if getattr(macro_snapshot, "treasury_10y", None) is not None:
-                    facts.append(
-                        ResearchFact(
-                            fact_id="macro-treasury-10y",
-                            symbol=None,
-                            category="macro",
-                            key="treasury_10y",
-                            value=macro_snapshot.treasury_10y,
-                            observed_at=as_of,
-                            known_at=as_of,
-                            as_of=as_of,
-                            source_type="fred",
-                        )
+                now_utc = datetime.now(timezone.utc)
+                is_historical = (now_utc - as_of) > timedelta(days=7)
+                explicit_unsupported = getattr(self.fred_client, "supports_pit", None) is False or getattr(self.fred_client, "is_pit_capable", None) is False
+
+                if is_historical and explicit_unsupported:
+                    source_status["macro:fred"] = SourceStatus(
+                        status=SourceState.NOT_PIT_CAPABLE,
+                        message="Historical FRED vintage reconstruction not supported by client",
+                        fetched_at=as_of,
                     )
-                if getattr(macro_snapshot, "fed_funds", None) is not None:
-                    facts.append(
-                        ResearchFact(
-                            fact_id="macro-fed-funds",
-                            symbol=None,
-                            category="macro",
-                            key="fed_funds_rate",
-                            value=macro_snapshot.fed_funds,
-                            observed_at=as_of,
-                            known_at=as_of,
-                            as_of=as_of,
-                            source_type="fred",
-                        )
+                else:
+                    try:
+                        macro_snapshot = self.fred_client.snapshot(as_of=as_of)
+                    except TypeError:
+                        macro_snapshot = self.fred_client.snapshot()
+
+                    dataset_versions["macro"] = "fred-v1"
+                    source_refs["macro:fred"] = "fred_snapshot()"
+                    source_status["macro:fred"] = SourceStatus(
+                        status=SourceState.AVAILABLE,
+                        fetched_at=as_of,
                     )
-                if getattr(macro_snapshot, "cpi_yoy", None) is not None:
-                    facts.append(
-                        ResearchFact(
-                            fact_id="macro-cpi-yoy",
-                            symbol=None,
-                            category="macro",
-                            key="cpi_yoy",
-                            value=macro_snapshot.cpi_yoy,
-                            observed_at=as_of,
-                            known_at=as_of,
-                            as_of=as_of,
-                            source_type="fred",
-                        )
-                    )
-                unemp = getattr(macro_snapshot, "unemployment", None) or getattr(macro_snapshot, "unemployment_rate", None)
-                if unemp is not None:
-                    facts.append(
-                        ResearchFact(
-                            fact_id="macro-unemployment-rate",
-                            symbol=None,
-                            category="macro",
-                            key="unemployment_rate",
-                            value=unemp,
-                            observed_at=as_of,
-                            known_at=as_of,
-                            as_of=as_of,
-                            source_type="fred",
-                        )
-                    )
-                if getattr(macro_snapshot, "yield_curve_10y2y", None) is not None:
-                    facts.append(
-                        ResearchFact(
-                            fact_id="macro-yield-curve-10y2y",
-                            symbol=None,
-                            category="macro",
-                            key="yield_curve_10y2y",
-                            value=macro_snapshot.yield_curve_10y2y,
-                            observed_at=as_of,
-                            known_at=as_of,
-                            as_of=as_of,
-                            source_type="fred",
-                        )
-                    )
-                if getattr(macro_snapshot, "industrial_production_yoy", None) is not None:
-                    facts.append(
-                        ResearchFact(
-                            fact_id="macro-industrial-production-yoy",
-                            symbol=None,
-                            category="macro",
-                            key="industrial_production_yoy",
-                            value=macro_snapshot.industrial_production_yoy,
-                            observed_at=as_of,
-                            known_at=as_of,
-                            as_of=as_of,
-                            source_type="fred",
-                        )
-                    )
-            except Exception:
+
+                    for field_name, fact_key in [
+                        ("treasury_10y", "treasury_10y"),
+                        ("fed_funds", "fed_funds_rate"),
+                        ("cpi_yoy", "cpi_yoy"),
+                        ("unemployment", "unemployment_rate"),
+                        ("yield_curve_10y2y", "yield_curve_10y2y"),
+                        ("industrial_production_yoy", "industrial_production_yoy"),
+                    ]:
+                        val = getattr(macro_snapshot, field_name, None)
+                        if val is not None:
+                            try:
+                                num_val = float(val)
+                                if math.isfinite(num_val):
+                                    facts.append(
+                                        ResearchFact(
+                                            fact_id=f"macro-{fact_key.replace('_', '-')}",
+                                            symbol=None,
+                                            category="macro",
+                                            key=fact_key,
+                                            value=num_val,
+                                            observed_at=as_of,
+                                            known_at=as_of,
+                                            as_of=as_of,
+                                            source_type="fred",
+                                        )
+                                    )
+                            except (ValueError, TypeError):
+                                pass
+            except Exception as e:
                 macro_snapshot = None
+                source_status["macro:fred"] = SourceStatus(
+                    status=SourceState.ERROR,
+                    message=str(e),
+                    fetched_at=as_of,
+                )
 
         # Sort facts deterministically
         sorted_facts = sorted(facts, key=lambda f: (f.category, f.key, f.symbol or "", f.fact_id))
 
-        # Compute cryptographic content hash
+        # Compute deterministic state_hash and provenance_hash
         hasher = hashlib.sha256()
-        hasher.update(f"{run_id}:{symbol}:{as_of.isoformat()}".encode("utf-8"))
+        hasher.update(symbol.encode("utf-8"))
+        for k, v in sorted(dataset_versions.items()):
+            hasher.update(f"{k}:{v}".encode("utf-8"))
+        for k, s in sorted(source_status.items()):
+            hasher.update(f"{k}:{s.status.value}".encode("utf-8"))
         for f in sorted_facts:
-            hasher.update(f.content_hash.encode("utf-8"))
-        content_hash = hasher.hexdigest()
-        snapshot_id = f"snap-{content_hash[:16]}"
+            hasher.update(f.semantic_hash.encode("utf-8"))
+        state_hash = hasher.hexdigest()
+
+        prov_hasher = hashlib.sha256()
+        prov_hasher.update(f"{run_id}:{symbol}:{as_of.isoformat()}:{state_hash}".encode("utf-8"))
+        provenance_hash = prov_hasher.hexdigest()
+        snapshot_id = f"snap-{provenance_hash[:16]}"
+        content_hash = provenance_hash
 
         return ResearchSnapshot(
             snapshot_id=snapshot_id,
             run_id=run_id,
             symbol=symbol,
             as_of=as_of,
+            state_hash=state_hash,
+            provenance_hash=provenance_hash,
+            content_hash=content_hash,
+            source_status=source_status,
             dataset_versions=dataset_versions,
             source_refs=source_refs,
-            content_hash=content_hash,
             facts=sorted_facts,
             market_bars=market_bars,
             sec_snapshot=sec_snapshot,

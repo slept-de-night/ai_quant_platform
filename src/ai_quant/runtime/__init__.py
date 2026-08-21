@@ -40,7 +40,14 @@ from .handlers import ResearchRuntimeHandlers
 from .pit import PITObservation, PITStore
 from .clock import QuantClock, HistoricalClock, LiveClock
 from .facts import ResearchFact
-from .snapshot import QuantSnapshot, SnapshotResolver, ResearchSnapshot, ResearchSnapshotBuilder
+from .snapshot import (
+    QuantSnapshot,
+    SnapshotResolver,
+    ResearchSnapshot,
+    ResearchSnapshotBuilder,
+    SourceState,
+    SourceStatus,
+)
 from .context import RuntimeMode, DecisionContext, CompiledResearchContext, ContextCompiler
 from .changeset import ChangeSet, ChangeItem, ChangeCategory
 from .strategy import StrategyProtocol, StrategyDecision
@@ -83,6 +90,8 @@ __all__ = [
     "ResearchFact",
     "ResearchSnapshot",
     "ResearchSnapshotBuilder",
+    "SourceState",
+    "SourceStatus",
     "RuntimeMode",
     "DecisionContext",
     "CompiledResearchContext",

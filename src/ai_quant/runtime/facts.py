@@ -33,15 +33,27 @@ class ResearchFact(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @property
-    def content_hash(self) -> str:
+    def semantic_hash(self) -> str:
+        """Deterministic fingerprint of the economic fact content alone (independent of run/as_of)."""
         val_str = (
             json.dumps(self.value, sort_keys=True, default=str)
             if isinstance(self.value, (dict, list))
             else str(self.value)
         )
         s = (
-            f"{self.fact_id}:{self.symbol or ''}:{self.category}:{self.key}:{val_str}:"
-            f"{self.observed_at.isoformat()}:{self.known_at.isoformat()}:{self.as_of.isoformat()}:"
-            f"{self.source_type}:{self.source_id or ''}:{self.source_hash or ''}:{self.dataset_version or ''}:{self.confidence}"
+            f"{self.symbol or ''}:{self.category}:{self.key}:{val_str}:"
+            f"{self.observed_at.isoformat()}:{self.known_at.isoformat()}:"
+            f"{self.source_type}:{self.dataset_version or ''}:{self.confidence}"
         )
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+    @property
+    def provenance_hash(self) -> str:
+        """Full cryptographic provenance hash tying fact identity, decision as_of, and sources."""
+        s = f"{self.fact_id}:{self.semantic_hash}:{self.as_of.isoformat()}:{self.source_id or ''}:{self.source_hash or ''}"
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+    @property
+    def content_hash(self) -> str:
+        """Backward-compatible content hash property (returns semantic_hash)."""
+        return self.semantic_hash

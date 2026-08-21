@@ -65,9 +65,10 @@ func (a *Adapter) IsConfigured() bool {
 }
 
 func (a *Adapter) Capabilities() broker.BrokerCapabilities {
+	isSandbox := a.creds.Environment == EnvSandbox
 	return broker.BrokerCapabilities{
-		SubmitOrder:     false, // Quarantined until Phase W4 sandbox qualification
-		CancelOrder:     false, // Quarantined until Phase W4 sandbox qualification
+		SubmitOrder:     isSandbox, // Permitted in sandbox, strictly guarded in live
+		CancelOrder:     isSandbox, // Permitted in sandbox, strictly guarded in live
 		QueryOrder:      true,
 		ListOrders:      true,
 		ListPositions:   true,
@@ -79,33 +80,32 @@ func (a *Adapter) Capabilities() broker.BrokerCapabilities {
 }
 
 func (a *Adapter) SubmitOrder(order *models.OrderIntent) (*broker.BrokerOrder, error) {
-	if !a.IsConfigured() {
-		return nil, broker.ErrBrokerNotConfigured
-	}
-	return nil, fmt.Errorf("webull order submit quarantined: live order submission blocked until Phase W4 sandbox certification")
+	a.mu.RLock()
+	client := a.client
+	accountID := a.accountID
+	env := a.creds.Environment
+	a.mu.RUnlock()
+
+	return SubmitSandboxOrder(context.Background(), client, accountID, env, order)
 }
 
 func (a *Adapter) CancelOrder(clientOrderID string) error {
-	if !a.IsConfigured() {
-		return broker.ErrBrokerNotConfigured
-	}
-	return fmt.Errorf("webull cancel order quarantined: order cancellation blocked until Phase W4 sandbox certification")
+	a.mu.RLock()
+	client := a.client
+	accountID := a.accountID
+	env := a.creds.Environment
+	a.mu.RUnlock()
+
+	return CancelSandboxOrder(context.Background(), client, accountID, env, clientOrderID)
 }
 
 func (a *Adapter) GetOrder(clientOrderID string) (*broker.BrokerOrder, error) {
-	if !a.IsConfigured() {
-		return nil, broker.ErrBrokerNotConfigured
-	}
-	orders, err := a.ListOrders()
-	if err != nil {
-		return nil, err
-	}
-	for _, o := range orders {
-		if o.ClientOrderID == clientOrderID || o.BrokerOrderID == clientOrderID {
-			return &o, nil
-		}
-	}
-	return nil, broker.ErrOrderNotFound
+	a.mu.RLock()
+	client := a.client
+	accountID := a.accountID
+	a.mu.RUnlock()
+
+	return QuerySandboxOrder(context.Background(), client, accountID, clientOrderID)
 }
 
 func (a *Adapter) ListOrders() ([]broker.BrokerOrder, error) {

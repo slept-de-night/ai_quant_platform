@@ -173,6 +173,12 @@ func main() {
 	riskCfg := models.DefaultRiskConfig()
 	engine := oms.NewEngine(initialEquity, riskCfg)
 	gateway := market.NewGateway()
+	engine.SetGateway(gateway)
+
+	// Execution Mode Guard: LIVE trading remains strictly prohibited until all real-money safety gates are certified.
+	if strings.EqualFold(os.Getenv("LIVE_TRADING_ENABLED"), "true") {
+		log.Fatalf("[FATAL] LIVE_TRADING_ENABLED=true is not permitted in v1.4 release. Platform is PAPER / SIMULATION only until all real-money gates are certified.")
+	}
 
 	reconcilerMaxAge := 300 * time.Second
 	if maxAgeStr := os.Getenv("RECONCILIATION_MAX_AGE_SECONDS"); maxAgeStr != "" {

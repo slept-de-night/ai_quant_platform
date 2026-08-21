@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"aq-engine-go/broker"
+	"aq-engine-go/market"
 	"aq-engine-go/models"
 	"aq-engine-go/reconciliation"
 )
@@ -660,6 +661,216 @@ func TestPositionProjectionStepByStep(t *testing.T) {
 	portState := engine.GetPortfolio("NVDA")
 	if portState.CurrentSymbolQty != 75.0 {
 		t.Fatalf("Expected CurrentSymbolQty=75, got %.2f", portState.CurrentSymbolQty)
+	}
+}
+
+func TestOrderInputValidation(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+
+	// Case 1: Empty Symbol
+	d1 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:        "",
+		Side:          models.SideBuy,
+		Qty:           10,
+		ClientOrderID: "val-1",
+	})
+	if d1.Approved {
+		t.Fatalf("Expected rejection for empty symbol")
+	}
+
+	// Case 2: Empty ClientOrderID
+	d2 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:        "AAPL",
+		Side:          models.SideBuy,
+		Qty:           10,
+		ClientOrderID: "",
+	})
+	if d2.Approved {
+		t.Fatalf("Expected rejection for empty client_order_id")
+	}
+
+	// Case 3: Non-executable Side (HOLD)
+	d3 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:        "AAPL",
+		Side:          models.SideHold,
+		Qty:           10,
+		ClientOrderID: "val-3",
+	})
+	if d3.Approved {
+		t.Fatalf("Expected rejection for HOLD side")
+	}
+
+	// Case 4: Non-positive quantity
+	d4 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:        "AAPL",
+		Side:          models.SideBuy,
+		Qty:           0,
+		ClientOrderID: "val-4",
+	})
+	if d4.Approved {
+		t.Fatalf("Expected rejection for qty=0")
+	}
+
+	// Case 5: Fractional quantity
+	d5 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            10,
+		RequestedQty:   10.5,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "val-5",
+	})
+	if d5.Approved {
+		t.Fatalf("Expected rejection for fractional quantity")
+	}
+}
+
+func TestAuthoritativePreTradePriceValidation(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	cfg.MaxTickStalenessSeconds = 10.0
+	engine := NewEngine(100000.0, cfg)
+	gateway := market.NewGateway()
+	engine.SetGateway(gateway)
+	engine.SetRequireGatewayTick(true)
+
+	// Case 1: Price unavailable in gateway when requireGatewayTick=true
+	d1 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:        "TSLA",
+		Side:          models.SideBuy,
+		Qty:           10,
+		ClientOrderID: "price-1",
+	})
+	if d1.Approved {
+		t.Fatalf("Expected rejection when price is unavailable in gateway")
+	}
+
+	// Case 2: Fresh tick in gateway -> Approved
+	gateway.PublishTick(models.MarketTick{
+		Symbol:    "TSLA",
+		Price:     200.0,
+		Volume:    100000,
+		Timestamp: time.Now().UTC(),
+		Source:    "broker",
+	})
+	d2 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:        "TSLA",
+		Side:          models.SideBuy,
+		Qty:           10,
+		ClientOrderID: "price-2",
+	})
+	if !d2.Approved {
+		t.Fatalf("Expected approval with fresh tick, got reasons: %v", d2.Reasons)
+	}
+
+	// Case 3: Stale tick in gateway (> MaxTickStalenessSeconds) -> Rejected
+	gateway.PublishTick(models.MarketTick{
+		Symbol:    "TSLA",
+		Price:     200.0,
+		Volume:    100000,
+		Timestamp: time.Now().UTC().Add(-30 * time.Second),
+		Source:    "broker",
+	})
+	d3 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:        "TSLA",
+		Side:          models.SideBuy,
+		Qty:           10,
+		ClientOrderID: "price-3",
+	})
+	if d3.Approved {
+		t.Fatalf("Expected rejection for stale tick (>10s)")
+	}
+
+	// Case 4: Client reference price deviates > 5% from gateway tick
+	gateway.PublishTick(models.MarketTick{
+		Symbol:    "TSLA",
+		Price:     200.0,
+		Volume:    100000,
+		Timestamp: time.Now().UTC(),
+		Source:    "broker",
+	})
+	d4 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:         "TSLA",
+		Side:           models.SideBuy,
+		Qty:            10,
+		ReferencePrice: 225.0, // 12.5% divergence
+		ClientOrderID:  "price-4",
+	})
+	if d4.Approved {
+		t.Fatalf("Expected rejection when client reference price deviates >5%%")
+	}
+}
+
+func TestShortSellingProhibited(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+	engine.SetAllowShorting(false)
+
+	// Case 1: Sell when holding zero shares -> Rejected
+	d1 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideSell,
+		Qty:            10,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "sell-1",
+	})
+	if d1.Approved {
+		t.Fatalf("Expected rejection for short sell when holding 0 shares")
+	}
+
+	// Seed long position with 10 shares
+	_, _ = engine.ApplyFill(models.Fill{
+		FillID:        "fill-seed-1",
+		ClientOrderID: "seed-buy",
+		Symbol:        "AAPL",
+		Side:          models.SideBuy,
+		Qty:           10,
+		Price:         150.0,
+		Timestamp:     time.Now().UTC(),
+	})
+
+	// Case 2: Sell 15 shares when holding 10 -> Rejected
+	d2 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideSell,
+		Qty:            15,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "sell-2",
+	})
+	if d2.Approved {
+		t.Fatalf("Expected rejection for sell qty (15) > position (10)")
+	}
+
+	// Case 3: Sell 5 shares when holding 10 -> Approved
+	d3 := engine.CheckRisk(&models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideSell,
+		Qty:            5,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "sell-3",
+	})
+	if !d3.Approved {
+		t.Fatalf("Expected approval for sell qty (5) <= position (10), got: %v", d3.Reasons)
+	}
+}
+
+func TestRiskNotionalSlippageDerivation(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	cfg.MaxPositionPct = 0.08 // Max $8,000 for $100,000 equity
+	engine := NewEngine(100000.0, cfg)
+	engine.SetSlippageBuffer(0.01) // 1% slippage buffer
+
+	// Buy 53 shares @ $150 = $7,950 base notional.
+	// With 1% slippage buffer, conservative riskNotional = 53 * 151.50 = $8,029.50 > $8,000 (breaches position limit).
+	d := engine.CheckRisk(&models.OrderIntent{
+		Symbol:         "AAPL",
+		Side:           models.SideBuy,
+		Qty:            53,
+		ReferencePrice: 150.0,
+		ClientOrderID:  "slip-1",
+	})
+	if d.Approved {
+		t.Fatalf("Expected rejection when conservative risk notional with slippage exceeds max position sizing")
 	}
 }
 

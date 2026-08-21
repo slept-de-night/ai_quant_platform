@@ -127,3 +127,21 @@ type MarketTick struct {
 	IsSimulated bool      `json:"is_simulated,omitempty"`
 }
 
+type ExecutionMode string
+
+const (
+	ExecutionModeSimulation ExecutionMode = "SIMULATION"
+	ExecutionModePaper      ExecutionMode = "PAPER"
+	ExecutionModeLive       ExecutionMode = "LIVE"
+)
+
+type PriceSnapshot struct {
+	Symbol      string    `json:"symbol"`
+	Bid         float64   `json:"bid"`
+	Ask         float64   `json:"ask"`
+	Last        float64   `json:"last"`
+	Timestamp   time.Time `json:"timestamp"`
+	Source      string    `json:"source"`
+	IsSimulated bool      `json:"is_simulated"`
+}
+

@@ -20,6 +20,7 @@ func setupTestServer() (*http.ServeMux, *oms.Engine, *broker.Registry, *reconcil
 	riskCfg := models.DefaultRiskConfig()
 	engine := oms.NewEngine(100000.0, riskCfg)
 	gateway := market.NewGateway()
+	engine.SetGateway(gateway)
 	brokerReg := broker.NewRegistry()
 	paperAdapter := broker.NewPaperAdapter("paper-sim", 100000.0)
 	brokerReg.Register(paperAdapter)

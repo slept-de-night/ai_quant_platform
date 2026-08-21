@@ -7,30 +7,37 @@ import (
 	"sync"
 	"time"
 
+	"strings"
+
 	"aq-engine-go/broker"
+	"aq-engine-go/market"
 	"aq-engine-go/metrics"
 	"aq-engine-go/models"
 	"aq-engine-go/reconciliation"
 )
 
 type Engine struct {
-	mu           sync.RWMutex
-	portfolio    models.PortfolioState
-	config       models.RiskConfig
-	orderHistory map[string]models.OrderIntent
-	orderList    []models.OrderIntent
-	fills        map[string]models.Fill     // fill_id -> Fill (idempotency ledger)
-	fillList     []models.Fill
-	positions    map[string]models.Position // confirmed fill position projection
-	dailyOrders  int
-	lastResetDay string
-	isFrozen     bool
-	freezeReason string
-	frozenAt     *time.Time
-	frozenBy     string
-	frozenRunID  string
-	journalReady bool
-	journal      *Journal
+	mu                 sync.RWMutex
+	portfolio          models.PortfolioState
+	config             models.RiskConfig
+	orderHistory       map[string]models.OrderIntent
+	orderList          []models.OrderIntent
+	fills              map[string]models.Fill     // fill_id -> Fill (idempotency ledger)
+	fillList           []models.Fill
+	positions          map[string]models.Position // confirmed fill position projection
+	dailyOrders        int
+	lastResetDay       string
+	isFrozen           bool
+	freezeReason       string
+	frozenAt           *time.Time
+	frozenBy           string
+	frozenRunID        string
+	journalReady       bool
+	journal            *Journal
+	gateway            *market.Gateway
+	requireGatewayTick bool
+	allowShorting      bool
+	slippageBuffer     float64
 }
 
 func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
@@ -46,16 +53,43 @@ func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
 			OrdersToday:           0,
 			IsFrozen:              false,
 		},
-		config:       cfg,
-		orderHistory: make(map[string]models.OrderIntent),
-		orderList:    make([]models.OrderIntent, 0),
-		fills:        make(map[string]models.Fill),
-		fillList:     make([]models.Fill, 0),
-		positions:    make(map[string]models.Position),
-		lastResetDay: time.Now().UTC().Format("2006-01-02"),
-		isFrozen:     false,
-		journalReady: true,
+		config:             cfg,
+		orderHistory:       make(map[string]models.OrderIntent),
+		orderList:          make([]models.OrderIntent, 0),
+		fills:              make(map[string]models.Fill),
+		fillList:           make([]models.Fill, 0),
+		positions:          make(map[string]models.Position),
+		lastResetDay:       time.Now().UTC().Format("2006-01-02"),
+		isFrozen:           false,
+		journalReady:       true,
+		requireGatewayTick: false,
+		allowShorting:      false,
+		slippageBuffer:     0.005,
 	}
+}
+
+func (e *Engine) SetGateway(g *market.Gateway) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.gateway = g
+}
+
+func (e *Engine) SetRequireGatewayTick(req bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.requireGatewayTick = req
+}
+
+func (e *Engine) SetAllowShorting(allow bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.allowShorting = allow
+}
+
+func (e *Engine) SetSlippageBuffer(buf float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.slippageBuffer = buf
 }
 
 func (e *Engine) SetJournal(j *Journal) {
@@ -369,20 +403,101 @@ func (e *Engine) evaluateRiskRules(p models.PortfolioState, dailyOrders int, ord
 		return reasons
 	}
 
-	// 2. Idempotency Check (if already present in history)
-	if order.ClientOrderID != "" {
-		if _, exists := e.orderHistory[order.ClientOrderID]; exists {
-			reasons = append(reasons, fmt.Sprintf("Duplicate client_order_id blocked: %s", order.ClientOrderID))
-			return reasons
+	// 2. Order Input Structural Validation
+	order.Symbol = strings.ToUpper(strings.TrimSpace(order.Symbol))
+	if order.Symbol == "" {
+		reasons = append(reasons, "Order symbol cannot be empty")
+		return reasons
+	}
+
+	if order.ClientOrderID == "" {
+		reasons = append(reasons, "client_order_id cannot be empty")
+		return reasons
+	}
+
+	// Idempotency Check (if already present in history)
+	if _, exists := e.orderHistory[order.ClientOrderID]; exists {
+		reasons = append(reasons, fmt.Sprintf("Duplicate client_order_id blocked: %s", order.ClientOrderID))
+		return reasons
+	}
+
+	// Executable Side Check (HOLD is strictly prohibited for broker order execution)
+	sideStr := strings.ToLower(strings.TrimSpace(string(order.Side)))
+	if sideStr != "buy" && sideStr != "sell" {
+		reasons = append(reasons, fmt.Sprintf("Invalid or non-executable order side '%s'; HOLD and non-trading sides are prohibited", order.Side))
+		return reasons
+	}
+
+	// Quantity Validation (positive whole shares required)
+	if order.Qty <= 0 {
+		reasons = append(reasons, fmt.Sprintf("Order quantity must be positive, got %d", order.Qty))
+	}
+	if order.RequestedQty > 0 && order.RequestedQty != float64(int(order.RequestedQty)) {
+		reasons = append(reasons, fmt.Sprintf("Fractional order quantity (%.4f) not supported; whole shares required", order.RequestedQty))
+	}
+
+	// 3. Authoritative Pre-Trade Pricing & Freshness Validation
+	var refPrice float64
+	hasValidGatewayTick := false
+
+	if e.gateway != nil {
+		tick, exists := e.gateway.GetLatestTick(order.Symbol)
+		if exists && tick.Price > 0 && !math.IsNaN(tick.Price) && !math.IsInf(tick.Price, 0) {
+			now := time.Now().UTC()
+			staleness := now.Sub(tick.Timestamp).Seconds()
+			if e.config.MaxTickStalenessSeconds > 0 && staleness > e.config.MaxTickStalenessSeconds {
+				reasons = append(reasons, fmt.Sprintf("Market data for %s is stale (age %.1fs > max %.1fs)", order.Symbol, staleness, e.config.MaxTickStalenessSeconds))
+			} else {
+				refPrice = tick.Price
+				hasValidGatewayTick = true
+
+				// Check client reference price divergence if supplied
+				if order.ReferencePrice > 0 {
+					dev := math.Abs(order.ReferencePrice - tick.Price) / tick.Price
+					if dev > 0.05 {
+						reasons = append(reasons, fmt.Sprintf("Client reference price $%.2f deviates %.1f%% from authoritative market price $%.2f", order.ReferencePrice, dev*100, tick.Price))
+					}
+				}
+			}
+		} else if e.requireGatewayTick {
+			reasons = append(reasons, fmt.Sprintf("Authoritative market price unavailable for %s", order.Symbol))
 		}
 	}
 
-	// 3. Daily Loss Limit Circuit Breaker
+	if !hasValidGatewayTick {
+		if order.ReferencePrice > 0 && !math.IsNaN(order.ReferencePrice) && !math.IsInf(order.ReferencePrice, 0) {
+			refPrice = order.ReferencePrice
+		} else if refPrice <= 0 {
+			reasons = append(reasons, fmt.Sprintf("Authoritative market price unavailable for %s", order.Symbol))
+		}
+	}
+
+	// 4. Conservative Risk Notional Calculation
+	slippage := e.slippageBuffer
+	if slippage <= 0 {
+		slippage = 0.005
+	}
+	conservativePrice := refPrice
+	if order.Side == models.SideBuy {
+		conservativePrice = refPrice * (1.0 + slippage)
+	} else if order.Side == models.SideSell {
+		conservativePrice = refPrice * (1.0 - slippage)
+	}
+
+	riskNotional := float64(order.Qty) * conservativePrice
+	if order.Notional <= 0 || order.Notional < float64(order.Qty)*refPrice*0.90 {
+		order.Notional = float64(order.Qty) * refPrice
+	}
+	if order.ReferencePrice <= 0 && refPrice > 0 {
+		order.ReferencePrice = refPrice
+	}
+
+	// 5. Daily Loss Limit Circuit Breaker
 	if p.DailyPnL < 0 && math.Abs(p.DailyPnL) > e.config.MaxDailyLossPct*p.Equity {
 		reasons = append(reasons, fmt.Sprintf("Daily loss limit breached: %.2f%% > %.2f%%", math.Abs(p.DailyPnL)/p.Equity*100, e.config.MaxDailyLossPct*100))
 	}
 
-	// 4. Drawdown Limit Circuit Breaker
+	// 6. Drawdown Limit Circuit Breaker
 	if p.PeakEquity > 0 {
 		dd := (p.PeakEquity - p.Equity) / p.PeakEquity
 		if dd > e.config.MaxDrawdownPct {
@@ -390,36 +505,50 @@ func (e *Engine) evaluateRiskRules(p models.PortfolioState, dailyOrders int, ord
 		}
 	}
 
-	// 5. Daily Orders Count Limit
+	// 7. Daily Orders Count Limit
 	if dailyOrders >= e.config.MaxOrdersPerDay {
 		reasons = append(reasons, fmt.Sprintf("Maximum daily orders limit reached (%d)", e.config.MaxOrdersPerDay))
 	}
 
-	// 6. Minimum Order Notional
-	if order.Notional < e.config.MinOrderNotional {
-		reasons = append(reasons, fmt.Sprintf("Order notional $%.2f is below minimum threshold $%.2f", order.Notional, e.config.MinOrderNotional))
+	// 8. Minimum Order Notional
+	if riskNotional < e.config.MinOrderNotional {
+		reasons = append(reasons, fmt.Sprintf("Order notional $%.2f is below minimum threshold $%.2f", riskNotional, e.config.MinOrderNotional))
 	}
 
-	// 7. Buy-Specific Balance and Exposure Limits
+	// 9. Buy-Specific Balance and Exposure Limits (using riskNotional with slippage buffer)
 	if order.Side == models.SideBuy {
 		// Minimum Cash Reserve
 		minCash := e.config.MinCashReservePct * p.Equity
-		if (p.Cash - order.Notional) < minCash {
-			reasons = append(reasons, fmt.Sprintf("Cash after order ($%.2f) falls below required reserve ($%.2f)", p.Cash-order.Notional, minCash))
+		if (p.Cash - riskNotional) < minCash {
+			reasons = append(reasons, fmt.Sprintf("Cash after order ($%.2f) falls below required reserve ($%.2f)", p.Cash-riskNotional, minCash))
 		}
 
 		// Maximum Position Sizing Limit
-		newSymExp := p.CurrentSymbolExposure + order.Notional
+		newSymExp := p.CurrentSymbolExposure + riskNotional
 		maxSymExp := e.config.MaxPositionPct * p.Equity
 		if newSymExp > maxSymExp {
 			reasons = append(reasons, fmt.Sprintf("Target position ($%.2f) exceeds max allowed position sizing ($%.2f)", newSymExp, maxSymExp))
 		}
 
 		// Maximum Gross Portfolio Exposure Limit
-		newGross := p.GrossExposure + order.Notional
+		newGross := p.GrossExposure + riskNotional
 		maxGross := e.config.MaxGrossExposurePct * p.Equity
 		if newGross > maxGross {
 			reasons = append(reasons, fmt.Sprintf("Gross exposure ($%.2f) exceeds max allowed portfolio limit ($%.2f)", newGross, maxGross))
+		}
+	}
+
+	// 10. Sell-Specific Controls & Short Selling Prohibition
+	if order.Side == models.SideSell {
+		if !e.allowShorting {
+			pos, hasPos := e.positions[order.Symbol]
+			availQty := 0.0
+			if hasPos {
+				availQty = pos.Qty
+			}
+			if availQty < float64(order.Qty) {
+				reasons = append(reasons, fmt.Sprintf("Short selling prohibited: requested sell qty (%d) exceeds confirmed long position (%.0f)", order.Qty, availQty))
+			}
 		}
 	}
 

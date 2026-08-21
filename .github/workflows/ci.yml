@@ -18,6 +18,11 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          # The Go module (services/aq-engine-go) is stdlib-only and has no
+          # go.sum dependency manifest. Disable the dependency cache so
+          # setup-go does not warn that it cannot find a Go dependency file
+          # at the repository root.
+          cache: 'false'
 
       - name: Go Vet & Test Execution Suite
         run: |

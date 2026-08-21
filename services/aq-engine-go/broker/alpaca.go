@@ -139,18 +139,32 @@ type alpacaOrderResponse struct {
 	Status         string  `json:"status"`
 }
 
-func parseAlpacaOrder(res alpacaOrderResponse) BrokerOrder {
-	qtyInt, _ := strconv.Atoi(res.Qty)
-	filledQtyInt, _ := strconv.Atoi(res.FilledQty)
+func parseAlpacaOrder(res alpacaOrderResponse) (BrokerOrder, error) {
+	qtyInt, err := strconv.Atoi(res.Qty)
+	if err != nil && res.Qty != "" {
+		return BrokerOrder{}, fmt.Errorf("failed to parse order qty '%s': %w", res.Qty, err)
+	}
+	filledQtyInt, err := strconv.Atoi(res.FilledQty)
+	if err != nil && res.FilledQty != "" {
+		return BrokerOrder{}, fmt.Errorf("failed to parse filled qty '%s': %w", res.FilledQty, err)
+	}
 
 	var avgFillPrice float64
-	if res.FilledAvgPrice != nil {
-		avgFillPrice, _ = strconv.ParseFloat(*res.FilledAvgPrice, 64)
+	if res.FilledAvgPrice != nil && *res.FilledAvgPrice != "" {
+		p, err := strconv.ParseFloat(*res.FilledAvgPrice, 64)
+		if err != nil {
+			return BrokerOrder{}, fmt.Errorf("failed to parse filled avg price '%s': %w", *res.FilledAvgPrice, err)
+		}
+		avgFillPrice = p
 	}
 
 	var limitPrice float64
-	if res.LimitPrice != nil {
-		limitPrice, _ = strconv.ParseFloat(*res.LimitPrice, 64)
+	if res.LimitPrice != nil && *res.LimitPrice != "" {
+		p, err := strconv.ParseFloat(*res.LimitPrice, 64)
+		if err != nil {
+			return BrokerOrder{}, fmt.Errorf("failed to parse limit price '%s': %w", *res.LimitPrice, err)
+		}
+		limitPrice = p
 	}
 
 	createdAt, _ := time.Parse(time.RFC3339Nano, res.CreatedAt)
@@ -179,7 +193,7 @@ func parseAlpacaOrder(res alpacaOrderResponse) BrokerOrder {
 		AverageFillPrice: avgFillPrice,
 		CreatedAt:        createdAt,
 		UpdatedAt:        updatedAt,
-	}
+	}, nil
 }
 
 func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, error) {
@@ -209,7 +223,10 @@ func (c *AlpacaAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, er
 		return nil, fmt.Errorf("failed to parse alpaca order response: %w", err)
 	}
 
-	bo := parseAlpacaOrder(res)
+	bo, err := parseAlpacaOrder(res)
+	if err != nil {
+		return nil, err
+	}
 	if bo.LimitPrice == 0 {
 		bo.LimitPrice = order.ReferencePrice
 	}
@@ -248,7 +265,10 @@ func (c *AlpacaAdapter) GetOrder(clientOrderID string) (*BrokerOrder, error) {
 		return nil, fmt.Errorf("failed to parse alpaca order response: %w", err)
 	}
 
-	bo := parseAlpacaOrder(res)
+	bo, err := parseAlpacaOrder(res)
+	if err != nil {
+		return nil, err
+	}
 	return &bo, nil
 }
 
@@ -271,7 +291,10 @@ func (c *AlpacaAdapter) GetOrderByBrokerID(brokerOrderID string) (*BrokerOrder, 
 		return nil, fmt.Errorf("failed to parse alpaca order response: %w", err)
 	}
 
-	bo := parseAlpacaOrder(res)
+	bo, err := parseAlpacaOrder(res)
+	if err != nil {
+		return nil, err
+	}
 	return &bo, nil
 }
 
@@ -295,7 +318,11 @@ func (c *AlpacaAdapter) ListOrders() ([]BrokerOrder, error) {
 
 	orders := make([]BrokerOrder, len(resList))
 	for i, res := range resList {
-		orders[i] = parseAlpacaOrder(res)
+		bo, err := parseAlpacaOrder(res)
+		if err != nil {
+			return nil, err
+		}
+		orders[i] = bo
 	}
 	return orders, nil
 }
@@ -328,9 +355,18 @@ func (c *AlpacaAdapter) ListPositions() ([]BrokerPosition, error) {
 
 	positions := make([]BrokerPosition, len(resList))
 	for i, pos := range resList {
-		qty, _ := strconv.ParseFloat(pos.Qty, 64)
-		mv, _ := strconv.ParseFloat(pos.MarketValue, 64)
-		cb, _ := strconv.ParseFloat(pos.CostBasis, 64)
+		qty, err := strconv.ParseFloat(pos.Qty, 64)
+		if err != nil && pos.Qty != "" {
+			return nil, fmt.Errorf("failed to parse position qty '%s': %w", pos.Qty, err)
+		}
+		mv, err := strconv.ParseFloat(pos.MarketValue, 64)
+		if err != nil && pos.MarketValue != "" {
+			return nil, fmt.Errorf("failed to parse position market value '%s': %w", pos.MarketValue, err)
+		}
+		cb, err := strconv.ParseFloat(pos.CostBasis, 64)
+		if err != nil && pos.CostBasis != "" {
+			return nil, fmt.Errorf("failed to parse position cost basis '%s': %w", pos.CostBasis, err)
+		}
 		positions[i] = BrokerPosition{
 			Symbol:      pos.Symbol,
 			Qty:         qty,
@@ -367,9 +403,18 @@ func (c *AlpacaAdapter) GetAccountState() (*AccountState, error) {
 		return nil, fmt.Errorf("failed to parse alpaca account: %w", err)
 	}
 
-	cash, _ := strconv.ParseFloat(res.Cash, 64)
-	equity, _ := strconv.ParseFloat(res.Equity, 64)
-	buyingPower, _ := strconv.ParseFloat(res.BuyingPower, 64)
+	cash, err := strconv.ParseFloat(res.Cash, 64)
+	if err != nil && res.Cash != "" {
+		return nil, fmt.Errorf("failed to parse account cash '%s': %w", res.Cash, err)
+	}
+	equity, err := strconv.ParseFloat(res.Equity, 64)
+	if err != nil && res.Equity != "" {
+		return nil, fmt.Errorf("failed to parse account equity '%s': %w", res.Equity, err)
+	}
+	buyingPower, err := strconv.ParseFloat(res.BuyingPower, 64)
+	if err != nil && res.BuyingPower != "" {
+		return nil, fmt.Errorf("failed to parse account buying power '%s': %w", res.BuyingPower, err)
+	}
 
 	return &AccountState{
 		Cash:        cash,
@@ -383,10 +428,10 @@ func (c *AlpacaAdapter) GetHealth() Health {
 	configured := c.IsConfigured()
 	msg := "Alpaca Broker API active"
 	if !configured {
-		msg = "Alpaca adapter running in mock paper simulation"
+		msg = "Alpaca adapter unconfigured (credentials missing); not ready for broker execution"
 	}
 	return Health{
-		Ready:         true,
+		Ready:         configured,
 		Connected:     configured,
 		Configured:    configured,
 		Broker:        BrokerKindAlpaca,

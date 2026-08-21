@@ -178,10 +178,10 @@ func (w *WebullAdapter) GetHealth() Health {
 	configured := w.IsConfigured()
 	msg := "Webull OpenAPI plug-and-play adapter active"
 	if !configured {
-		msg = "Webull adapter active in sandbox simulation mode (credentials not provided)"
+		msg = "Webull adapter unconfigured (credentials missing); not ready for broker execution"
 	}
 	return Health{
-		Ready:         true,
+		Ready:         configured,
 		Connected:     configured,
 		Configured:    configured,
 		Broker:        BrokerKindWebull,

@@ -23,8 +23,11 @@ func runBrokerContractSuite(t *testing.T, b BrokerAdapter) {
 			t.Errorf("Expected non-empty adapter Environment()")
 		}
 		health := b.GetHealth()
-		if !health.Ready {
-			t.Errorf("Expected adapter health Ready=true, got %+v", health)
+		if health.Ready != b.IsConfigured() {
+			t.Errorf("Expected adapter health Ready=%v (matching IsConfigured), got %+v", b.IsConfigured(), health)
+		}
+		if health.Connected != b.IsConfigured() {
+			t.Errorf("Expected adapter health Connected=%v, got %+v", b.IsConfigured(), health)
 		}
 	})
 
@@ -71,7 +74,6 @@ func runBrokerContractSuite(t *testing.T, b BrokerAdapter) {
 	})
 
 	t.Run("CancelOrderNormalization", func(t *testing.T) {
-		// Cancel known order or client ID
 		err := b.CancelOrder("contract-ord-1")
 		if err != nil {
 			t.Logf("CancelOrder on %s returned: %v (acceptable for mock adapters)", b.Name(), err)
@@ -195,4 +197,35 @@ func TestBrokerContractSuite_WebullAdapter(t *testing.T) {
 	// Webull unconfigured uses local paper fallback which must also obey contract invariants
 	webull := NewWebullAdapter("webull-contract-test", "", "", "", true)
 	runBrokerContractSuite(t, webull)
+}
+
+func TestAlpacaStrictPayloadParsingErrors(t *testing.T) {
+	// Test malformed position quantities
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/positions":
+			json.NewEncoder(w).Encode([]alpacaPositionResponse{
+				{Symbol: "AAPL", Qty: "not-a-number", MarketValue: "100.0", CostBasis: "100.0"},
+			})
+		case "/v2/account":
+			json.NewEncoder(w).Encode(alpacaAccountResponse{
+				Cash: "corrupted_cash",
+			})
+		}
+	}))
+	defer server.Close()
+
+	alpaca := NewAlpacaAdapter("alpaca-strict-test", "key", "secret", true)
+	alpaca.SetBaseURL(server.URL)
+
+	_, err := alpaca.ListPositions()
+	if err == nil {
+		t.Fatalf("Expected error when parsing non-numeric position quantity, got nil")
+	}
+
+	_, err = alpaca.GetAccountState()
+	if err == nil {
+		t.Fatalf("Expected error when parsing non-numeric account cash, got nil")
+	}
 }

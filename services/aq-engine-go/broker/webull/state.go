@@ -38,12 +38,30 @@ type WebullAccountResponse struct {
 	AccountCurrencyAssets     []WebullAccountCurrencyAsset  `json:"account_currency_assets"`
 }
 
+// WebullPositionLeg is a single leg of a multi-leg position (options). Official
+// positions may carry a nested `legs` array; only leg_id/symbol/quantity are
+// relevant to normalized broker truth.
+type WebullPositionLeg struct {
+	LegID   string `json:"leg_id"`
+	Symbol  string `json:"symbol"`
+	Quantity string `json:"quantity"`
+}
+
+// WebullPositionItem reflects the CURRENT official Webull Trading API account
+// position response schema (v2.0). Quantities and prices are string-typed and
+// fractional quantities are supported — never truncate them to integers.
 type WebullPositionItem struct {
-	Symbol      string `json:"symbol"`
-	Quantity    string `json:"quantity"`
-	MarketValue string `json:"market_value"`
-	CostBasis   string `json:"cost_basis"`
-	LastPrice   string `json:"last_price"`
+	PositionID           string              `json:"position_id"`
+	Currency             string              `json:"currency"`
+	Quantity             string              `json:"quantity"`
+	Symbol               string              `json:"symbol"`
+	InstrumentType       string              `json:"instrument_type"`
+	LastPrice            string              `json:"last_price"`
+	CostPrice            string              `json:"cost_price"`
+	UnrealizedProfitLoss string              `json:"unrealized_profit_loss"`
+	OptionStrategy       string              `json:"option_strategy"`
+	EventOutcome         string              `json:"event_outcome"`
+	Legs                 []WebullPositionLeg `json:"legs"`
 }
 
 type WebullOrderItem struct {
@@ -133,6 +151,13 @@ func FetchAccount(ctx context.Context, client *Client, accountID string) (*broke
 }
 
 // FetchPositions queries the Webull OpenAPI positions endpoint and returns normalized BrokerPositions.
+//
+// The official position schema does not include market_value or cost_basis in a
+// broker-returned form; it returns quantity, last_price, and cost_price. Market
+// value and cost basis are DERIVED (quantity * last_price and quantity *
+// cost_price) ONLY when both operands are present and valid. If quantity is valid
+// but price is absent/malformed, the derived field is left at 0 (never invented);
+// the exact broker quantity is always preserved.
 func FetchPositions(ctx context.Context, client *Client, accountID string) ([]broker.BrokerPosition, error) {
 	if client == nil {
 		return nil, fmt.Errorf("webull client is nil")
@@ -155,24 +180,39 @@ func FetchPositions(ctx context.Context, client *Client, accountID string) ([]br
 
 	positions := make([]broker.BrokerPosition, 0, len(rawItems))
 	for _, item := range rawItems {
+		if item.Symbol == "" {
+			return nil, fmt.Errorf("webull position is missing symbol")
+		}
 		qty, err := parseRequiredDecimal("quantity", item.Quantity)
 		if err != nil {
 			return nil, err
 		}
-		mv, err := parseOptionalDecimal("market_value", item.MarketValue)
+
+		// Derive market value / cost basis from (quantity * price) only when both
+		// are present and valid. last_price and cost_price are optional per the
+		// official schema, so a malformed price is an error but an absent price
+		// simply leaves the derived field at 0 (never invented).
+		var marketValue, costBasis float64
+		lastPrice, err := parseOptionalDecimal("last_price", item.LastPrice)
 		if err != nil {
 			return nil, err
 		}
-		cost, err := parseOptionalDecimal("cost_basis", item.CostBasis)
+		if lastPrice != nil {
+			marketValue = qty * *lastPrice
+		}
+		costPrice, err := parseOptionalDecimal("cost_price", item.CostPrice)
 		if err != nil {
 			return nil, err
+		}
+		if costPrice != nil {
+			costBasis = qty * *costPrice
 		}
 
 		positions = append(positions, broker.BrokerPosition{
 			Symbol:      item.Symbol,
 			Qty:         qty,
-			MarketValue: decimalOrFallback(mv, 0),
-			CostBasis:   decimalOrFallback(cost, 0),
+			MarketValue: marketValue,
+			CostBasis:   costBasis,
 		})
 	}
 

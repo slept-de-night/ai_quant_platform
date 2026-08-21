@@ -78,18 +78,26 @@ func TestFetchPositions_ParsesMultiplePositions(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`[
 			{
-				"symbol": "AAPL",
+				"position_id": "pos_a_1",
+				"currency": "USD",
 				"quantity": "50.0",
-				"market_value": "7500.00",
-				"cost_basis": "6000.00",
-				"last_price": "150.00"
+				"symbol": "AAPL",
+				"instrument_type": "EQUITY",
+				"last_price": "150.00",
+				"cost_price": "120.00",
+				"unrealized_profit_loss": "1500.00",
+				"option_strategy": "SINGLE"
 			},
 			{
-				"symbol": "NVDA",
+				"position_id": "pos_a_2",
+				"currency": "USD",
 				"quantity": "25.0",
-				"market_value": "12500.00",
-				"cost_basis": "10000.00",
-				"last_price": "500.00"
+				"symbol": "NVDA",
+				"instrument_type": "EQUITY",
+				"last_price": "500.00",
+				"cost_price": "400.00",
+				"unrealized_profit_loss": "2500.00",
+				"option_strategy": "SINGLE"
 			}
 		]`))
 	}))
@@ -115,10 +123,10 @@ func TestFetchPositions_ParsesMultiplePositions(t *testing.T) {
 	if len(positions) != 2 {
 		t.Fatalf("Expected 2 positions, got %d", len(positions))
 	}
-	if positions[0].Symbol != "AAPL" || positions[0].Qty != 50.0 || positions[0].MarketValue != 7500.00 {
+	if positions[0].Symbol != "AAPL" || positions[0].Qty != 50.0 || positions[0].MarketValue != 7500.00 || positions[0].CostBasis != 6000.00 {
 		t.Fatalf("Mismatch in position 0: %+v", positions[0])
 	}
-	if positions[1].Symbol != "NVDA" || positions[1].Qty != 25.0 || positions[1].MarketValue != 12500.00 {
+	if positions[1].Symbol != "NVDA" || positions[1].Qty != 25.0 || positions[1].MarketValue != 12500.00 || positions[1].CostBasis != 10000.00 {
 		t.Fatalf("Mismatch in position 1: %+v", positions[1])
 	}
 }
@@ -199,7 +207,7 @@ func TestFetchBrokerSnapshot_ConstructsReconciliationBrokerState(t *testing.T) {
 			w.Write([]byte(`{"total_asset_currency":"USD","total_cash_balance":"100000.00","total_market_value":"20000.00","total_net_liquidation_value":"120000.00","account_currency_assets":[{"currency":"USD","cash_balance":"100000.00","buying_power":"130000.00"}]}`))
 		case "/trading/assets/positions/list":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`[{"symbol":"MSFT","quantity":"50","market_value":"20000.00","cost_basis":"18000.00"}]`))
+			w.Write([]byte(`[{"position_id":"pos_msft_1","currency":"USD","quantity":"50","symbol":"MSFT","instrument_type":"EQUITY","last_price":"400.00","cost_price":"360.00","unrealized_profit_loss":"2000.00","option_strategy":"SINGLE"}]`))
 		case "/trading/orders/open-orders/list":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`[{"order_id":"ord_1","client_order_id":"c1","symbol":"MSFT","side":"BUY","total_quantity":"50","filled_quantity":"50","avg_price":"360.0","status":"FILLED","create_time":"2026-08-21T10:00:00Z","update_time":"2026-08-21T10:00:00Z"}]`))

@@ -10,6 +10,35 @@ import (
 	"time"
 )
 
+// TestClient_OfficialBaseURLs verifies sandbox and live environments resolve to
+// the current official Webull OpenAPI hosts.
+func TestClient_OfficialBaseURLs(t *testing.T) {
+	sandbox := Credentials{AppKey: "k", AppSecret: "s", Environment: EnvSandbox}
+	live := Credentials{AppKey: "k", AppSecret: "s", Environment: EnvLive}
+
+	sc, err := NewClient(sandbox)
+	if err != nil {
+		t.Fatalf("NewClient(sandbox) failed: %v", err)
+	}
+	if sc.baseURL != "https://api.sandbox.webull.com" {
+		t.Fatalf("Sandbox base URL mismatch, got '%s'", sc.baseURL)
+	}
+	if sc.baseURL == SandboxBaseURL && SandboxBaseURL != "https://api.sandbox.webull.com" {
+		t.Fatalf("SandboxBaseURL constant is not the official host")
+	}
+
+	lc, err := NewClient(live)
+	if err != nil {
+		t.Fatalf("NewClient(live) failed: %v", err)
+	}
+	if lc.baseURL != "https://api.webull.com" {
+		t.Fatalf("Live base URL mismatch, got '%s'", lc.baseURL)
+	}
+	if LiveBaseURL != "https://api.webull.com" {
+		t.Fatalf("LiveBaseURL constant is not the official host")
+	}
+}
+
 // TestClient_429RetryBackoffAndRecovery verifies that HTTP 429 triggers exponential backoff and recovers upon subsequent 200 OK.
 func TestClient_429RetryBackoffAndRecovery(t *testing.T) {
 	var attempts int32

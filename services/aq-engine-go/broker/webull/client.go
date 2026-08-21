@@ -16,10 +16,10 @@ import (
 	"time"
 )
 
-// Standard OpenAPI Base URLs
+// Official OpenAPI Base URLs (environment is explicit; never inferred from URL text).
 const (
-	SandboxBaseURL = "https://quoteapi.webullfintech.com/api"
-	LiveBaseURL    = "https://quoteapi.webullbroker.com/api"
+	SandboxBaseURL = "https://api.sandbox.webull.com"
+	LiveBaseURL    = "https://api.webull.com"
 )
 
 // Custom error types

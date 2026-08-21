@@ -2,20 +2,22 @@ package webull
 
 import (
 	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/sha1"
 	"encoding/base64"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestSigner_DeterministicKnownVector verifies the exact HMAC-SHA256 signature output against a reference calculation.
-func TestSigner_DeterministicKnownVector(t *testing.T) {
+// TestSigner_OfficialWorkedVector verifies the exact official Webull HMAC-SHA1
+// signature output using the published worked example, matching the official
+// deterministic test vector exactly (acceptance: official inputs -> official output).
+func TestSigner_OfficialWorkedVector(t *testing.T) {
 	creds := Credentials{
-		AppKey:      "wb_test_key_001",
-		AppSecret:   "wb_secret_test_002",
-		AccountID:   "acc_12345",
+		AppKey:      "776da210ab4a452795d74e726ebd74b6",
+		AppSecret:   "0f50a2e853334a9aae1a783bee120c1f",
 		Environment: EnvSandbox,
 	}
 
@@ -24,81 +26,108 @@ func TestSigner_DeterministicKnownVector(t *testing.T) {
 		t.Fatalf("NewSigner failed: %v", err)
 	}
 
-	method := "POST"
-	path := "/api/v1/trade/order/submit"
+	path := "/trade/place_order"
 	query := url.Values{
-		"symbol":     []string{"AAPL"},
-		"account_id": []string{"acc_12345"},
+		"a1": []string{"webull"},
+		"a2": []string{"123"},
+		"a3": []string{"xxx"},
+		"q1": []string{"yyy"},
 	}
-	body := []byte(`{"symbol":"AAPL","qty":10,"side":"BUY","type":"LIMIT","price":150.50}`)
-	timestamp := "2026-08-21T10:00:00Z"
-	nonce := "a1b2c3d4e5f60718"
+	body := []byte(`{"k1":123,"k2":"this is the api request body","k3":true,"k4":{"foo":[1,2]}}`)
+	timestamp := "2022-01-04T03:55:31Z"
+	nonce := "48ef5afed43d4d91ae514aaeafbc29ba"
 
-	sig, canonical, err := signer.Sign(method, path, query, body, timestamp, nonce)
+	sig, _, err := signer.Sign("api.webull.com", path, query, body, timestamp, nonce)
 	if err != nil {
 		t.Fatalf("Sign failed: %v", err)
 	}
 
-	// Verify canonical string composition
-	expectedBodyHash := sha256.Sum256(body)
-	expectedQuery := "account_id=acc_12345&symbol=AAPL"
+	// Official worked-example result. If this mismatches, the signer is not
+	// producing the official signature and must be corrected before D2.
+	if sig != "kvlS6opdZDhEBo5jq40nHYXaLvM=" {
+		t.Fatalf("Official signature vector mismatch!\nExpected: kvlS6opdZDhEBo5jq40nHYXaLvM=\nGot:      %s", sig)
+	}
+}
 
-	if canonical == "" {
-		t.Fatalf("Expected non-empty canonical string")
+// TestSigner_CanonicalConsistency verifies the canonical signing string is
+// internally consistent with the returned signature: the signature must equal
+// Base64(HMAC-SHA1(appSecret + "&", percentEncodeAll(canonical))).
+func TestSigner_CanonicalConsistency(t *testing.T) {
+	creds := Credentials{
+		AppKey:      "mem-a-key",
+		AppSecret:   "mem-app-secret-0123456789abcdef",
+		Environment: EnvSandbox,
 	}
 
-	// Manually compute reference HMAC-SHA256
-	mac := hmac.New(sha256.New, []byte(creds.AppSecret))
-	mac.Write([]byte(canonical))
-	expectedSig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-
-	if sig != expectedSig {
-		t.Fatalf("Signature mismatch!\nExpected: %s\nGot:      %s\nCanonical:\n%s", expectedSig, sig, canonical)
+	signer, err := NewSigner(creds)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
 	}
 
-	_ = expectedBodyHash
-	_ = expectedQuery
+	query := url.Values{
+		"a1": []string{"webull"},
+		"a2": []string{"123"},
+		"a3": []string{"xxx"},
+		"q1": []string{"yyy"},
+	}
+	body := []byte(`{"k1":123,"k2":"this is the api request body","k3":true,"k4":{"foo":[1,2]}}`)
+
+	sig, canonical, err := signer.Sign("api.webull.com", "/trade/place_order", query, body,
+		"2022-01-04T03:55:31Z", "48ef5afed43d4d91ae514aaeafbc29ba")
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+	if canonical == "" || sig == "" {
+		t.Fatalf("Expected non-empty canonical and signature")
+	}
+
+	expected := percentEncodeAll(canonical)
+	key := creds.AppSecret + "&"
+	mac := hmac.New(sha1.New, []byte(key))
+	mac.Write([]byte(expected))
+	recomputed := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	if sig != recomputed {
+		t.Fatalf("Signature not consistent with canonical!\nExpected: %s\nGot:      %s", recomputed, sig)
+	}
 }
 
 // TestCredentials_Validation verifies credential completeness and environment guards.
 func TestCredentials_Validation(t *testing.T) {
-	// 1. Missing AppKey
 	c1 := Credentials{AppKey: "", AppSecret: "secret", Environment: EnvSandbox}
 	if err := c1.Validate(); err == nil {
 		t.Fatalf("Expected error for missing AppKey")
 	}
 
-	// 2. Missing AppSecret
 	c2 := Credentials{AppKey: "key", AppSecret: "", Environment: EnvSandbox}
 	if err := c2.Validate(); err == nil {
 		t.Fatalf("Expected error for missing AppSecret")
 	}
 
-	// 3. Invalid Environment
 	c3 := Credentials{AppKey: "key", AppSecret: "secret", Environment: "UNKNOWN"}
 	if err := c3.Validate(); err == nil {
 		t.Fatalf("Expected error for invalid environment")
 	}
 
-	// 4. Valid Sandbox
 	c4 := Credentials{AppKey: "key", AppSecret: "secret", Environment: EnvSandbox}
 	if err := c4.Validate(); err != nil {
 		t.Fatalf("Expected valid sandbox credentials, got: %v", err)
 	}
 
-	// 5. Valid Live
 	c5 := Credentials{AppKey: "key", AppSecret: "secret", Environment: EnvLive}
 	if err := c5.Validate(); err != nil {
 		t.Fatalf("Expected valid live credentials, got: %v", err)
 	}
 }
 
-// TestSigner_ApplyHeaders verifies proper header decoration on outgoing HTTP requests.
+// TestSigner_ApplyHeaders verifies official header decoration and that the app
+// secret is never transmitted as a request header.
 func TestSigner_ApplyHeaders(t *testing.T) {
 	creds := Credentials{
 		AppKey:      "my-app-key",
 		AppSecret:   "my-super-secret-key-32charslong!",
 		AccountID:   "acc-9988",
+		AccessToken: "wb-access-token-abc",
 		Environment: EnvSandbox,
 	}
 
@@ -107,7 +136,7 @@ func TestSigner_ApplyHeaders(t *testing.T) {
 		t.Fatalf("NewSigner failed: %v", err)
 	}
 
-	req, err := http.NewRequest("GET", "https://quoteapi.webullfintech.com/api/v1/account/positions?symbol=NVDA", nil)
+	req, err := http.NewRequest("GET", "https://api.sandbox.webull.com/v2/account/positions?symbol=NVDA", nil)
 	if err != nil {
 		t.Fatalf("NewRequest failed: %v", err)
 	}
@@ -118,23 +147,37 @@ func TestSigner_ApplyHeaders(t *testing.T) {
 		t.Fatalf("ApplyHeaders failed: %v", err)
 	}
 
-	if req.Header.Get("App-Key") != "my-app-key" {
-		t.Fatalf("Expected App-Key 'my-app-key', got '%s'", req.Header.Get("App-Key"))
+	if req.Header.Get("x-app-key") != "my-app-key" {
+		t.Fatalf("Expected x-app-key 'my-app-key', got '%s'", req.Header.Get("x-app-key"))
 	}
-	if req.Header.Get("Account-Id") != "acc-9988" {
-		t.Fatalf("Expected Account-Id 'acc-9988', got '%s'", req.Header.Get("Account-Id"))
+	if req.Header.Get("x-timestamp") != "2026-08-21T12:30:00Z" {
+		t.Fatalf("Expected x-timestamp '2026-08-21T12:30:00Z', got '%s'", req.Header.Get("x-timestamp"))
 	}
-	if req.Header.Get("Timestamp") != "2026-08-21T12:30:00Z" {
-		t.Fatalf("Expected Timestamp '2026-08-21T12:30:00Z', got '%s'", req.Header.Get("Timestamp"))
+	if req.Header.Get("x-signature-algorithm") != "HMAC-SHA1" {
+		t.Fatalf("Expected x-signature-algorithm HMAC-SHA1, got '%s'", req.Header.Get("x-signature-algorithm"))
 	}
-	if req.Header.Get("Nonce") == "" {
-		t.Fatalf("Expected non-empty Nonce header")
+	if req.Header.Get("x-signature-version") != "1.0" {
+		t.Fatalf("Expected x-signature-version 1.0, got '%s'", req.Header.Get("x-signature-version"))
 	}
-	if req.Header.Get("Signature") == "" {
-		t.Fatalf("Expected non-empty Signature header")
+	if req.Header.Get("x-version") != "v2" {
+		t.Fatalf("Expected x-version v2, got '%s'", req.Header.Get("x-version"))
 	}
-	if req.Header.Get("Signature-Method") != "HMAC-SHA256" {
-		t.Fatalf("Expected Signature-Method 'HMAC-SHA256', got '%s'", req.Header.Get("Signature-Method"))
+	if req.Header.Get("x-signature-nonce") == "" {
+		t.Fatalf("Expected non-empty x-signature-nonce header")
+	}
+	if req.Header.Get("x-signature") == "" {
+		t.Fatalf("Expected non-empty x-signature header")
+	}
+	if req.Header.Get("x-access-token") != "wb-access-token-abc" {
+		t.Fatalf("Expected x-access-token 'wb-access-token-abc', got '%s'", req.Header.Get("x-access-token"))
+	}
+
+	// The app secret must never be present as a request header.
+	for _, name := range strings.Split("x-app-key x-timestamp x-signature x-signature-algorithm x-signature-version x-signature-nonce x-version x-access-token", " ") {
+		h := req.Header.Get(name)
+		if h != "" && strings.Contains(h, creds.AppSecret) {
+			t.Fatalf("App secret leaked via header %s", name)
+		}
 	}
 }
 
@@ -151,7 +194,7 @@ func TestGenerateNonce(t *testing.T) {
 	if n1 == n2 {
 		t.Fatalf("Expected unique nonces, got identical: %s", n1)
 	}
-	if len(n1) != 32 { // 16 bytes = 32 hex chars
+	if len(n1) != 32 {
 		t.Fatalf("Expected 32 hex chars for 16 bytes, got %d", len(n1))
 	}
 }

@@ -2,8 +2,9 @@ package webull
 
 import (
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rand"
-	"crypto/sha256"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -13,6 +14,13 @@ import (
 	"sort"
 	"strings"
 	"time"
+)
+
+// OpenAPI signing constants per official Webull documentation.
+const (
+	SignatureAlgorithm = "HMAC-SHA1"
+	SignatureVersion   = "1.0"
+	APIVersion         = "v2"
 )
 
 // Environment represents the target Webull deployment environment.
@@ -27,6 +35,7 @@ const (
 type Credentials struct {
 	AppKey      string      `json:"app_key"`
 	AppSecret   string      `json:"app_secret"`
+	AccessToken string      `json:"access_token,omitempty"`
 	AccountID   string      `json:"account_id"`
 	Environment Environment `json:"environment"`
 }
@@ -45,7 +54,7 @@ func (c *Credentials) Validate() error {
 	return nil
 }
 
-// Signer handles Webull OpenAPI canonical request building and HMAC-SHA256 signature generation.
+// Signer handles Webull OpenAPI canonical request building and official HMAC-SHA1 signature generation.
 type Signer struct {
 	creds Credentials
 }
@@ -70,67 +79,80 @@ func GenerateNonce(length int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-// FormatTimestamp returns an RFC3339 UTC timestamp string.
+// FormatTimestamp returns an RFC3339 UTC timestamp string (YYYY-MM-DDThh:mm:ssZ).
 func FormatTimestamp(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// BuildCanonicalQuery sorts query parameters alphabetically by key and constructs a deterministic query string.
-func BuildCanonicalQuery(params url.Values) string {
-	if len(params) == 0 {
-		return ""
+// percentEncodeAll percent-encodes every byte except the RFC 3986 unreserved set.
+// This matches the official URL-encoding of the complete signing string (safe="").
+func percentEncodeAll(s string) string {
+	const hexDigits = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hexDigits[c>>4])
+		b.WriteByte(hexDigits[c&0x0F])
 	}
-	keys := make([]string, 0, len(params))
-	for k := range params {
+	return b.String()
+}
+
+// buildSigningString constructs str1: query parameters merged with the official
+// signing headers, sorted ascending by name and joined as key=value&key=value...
+func (s *Signer) buildSigningString(query url.Values, host, timestamp, nonce string) string {
+	items := make(map[string]string, len(query)+6)
+	for k, vals := range query {
+		vals = append([]string(nil), vals...)
+		sort.Strings(vals)
+		items[k] = strings.Join(vals, "&")
+	}
+	items["x-app-key"] = s.creds.AppKey
+	items["x-timestamp"] = timestamp
+	items["x-signature-algorithm"] = SignatureAlgorithm
+	items["x-signature-version"] = SignatureVersion
+	items["x-signature-nonce"] = nonce
+	items["host"] = host
+
+	keys := make([]string, 0, len(items))
+	for k := range items {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
-	var pairs []string
+	pairs := make([]string, 0, len(keys))
 	for _, k := range keys {
-		vals := params[k]
-		sort.Strings(vals)
-		for _, v := range vals {
-			pairs = append(pairs, fmt.Sprintf("%s=%s", url.QueryEscape(k), url.QueryEscape(v)))
-		}
+		pairs = append(pairs, k+"="+items[k])
 	}
 	return strings.Join(pairs, "&")
 }
 
-// BuildCanonicalString constructs the deterministic payload string to be hashed and signed.
-// Canonical Format:
-// METHOD\n
-// PATH\n
-// CANONICAL_QUERY_STRING\n
-// BODY_SHA256_HEX\n
-// TIMESTAMP\n
-// NONCE
-func BuildCanonicalString(method, path string, query url.Values, body []byte, timestamp, nonce string) string {
-	methodNorm := strings.ToUpper(strings.TrimSpace(method))
-	pathNorm := strings.TrimSpace(path)
-	if !strings.HasPrefix(pathNorm, "/") {
-		pathNorm = "/" + pathNorm
+// Sign computes the official HMAC-SHA1 OpenAPI signature for a request.
+//
+// Algorithm (official Webull documentation):
+//
+//  1. Merge query params + signing headers (x-app-key, x-signature-algorithm,
+//     x-signature-version, x-signature-nonce, x-timestamp, host).
+//  2. Sort names ascending.
+//  3. Join as key=value&key=value... -> str1.
+//  4. If body exists, compute uppercase MD5 hex of the body -> str2.
+//  5. str3 = path + "&" + str1 [+ "&" + str2].
+//  6. URL-encode the complete signing string.
+//  7. Signing key = appSecret + "&".
+//  8. Signature = Base64(HMAC-SHA1(signingKey, encodedString)).
+func (s *Signer) Sign(host, path string, query url.Values, body []byte, timestamp, nonce string) (signature string, canonicalString string, err error) {
+	if strings.TrimSpace(host) == "" {
+		return "", "", errors.New("host cannot be empty")
 	}
-
-	canonicalQuery := BuildCanonicalQuery(query)
-
-	bodyHash := sha256.Sum256(body)
-	bodyHashHex := hex.EncodeToString(bodyHash[:])
-
-	parts := []string{
-		methodNorm,
-		pathNorm,
-		canonicalQuery,
-		bodyHashHex,
-		timestamp,
-		nonce,
+	if strings.TrimSpace(path) == "" {
+		return "", "", errors.New("path cannot be empty")
 	}
-
-	return strings.Join(parts, "\n")
-}
-
-// Sign computes the HMAC-SHA256 signature for a request and returns both the Base64 signature and canonical string.
-func (s *Signer) Sign(method, path string, query url.Values, body []byte, timestamp, nonce string) (signature string, canonicalString string, err error) {
 	if timestamp == "" {
 		return "", "", errors.New("timestamp cannot be empty")
 	}
@@ -138,17 +160,29 @@ func (s *Signer) Sign(method, path string, query url.Values, body []byte, timest
 		return "", "", errors.New("nonce cannot be empty")
 	}
 
-	canonicalString = BuildCanonicalString(method, path, query, body, timestamp, nonce)
+	str1 := s.buildSigningString(query, host, timestamp, nonce)
 
-	mac := hmac.New(sha256.New, []byte(s.creds.AppSecret))
-	mac.Write([]byte(canonicalString))
+	var str3 string
+	if len(body) > 0 {
+		sum := md5.Sum(body)
+		str2 := strings.ToUpper(hex.EncodeToString(sum[:]))
+		str3 = path + "&" + str1 + "&" + str2
+	} else {
+		str3 = path + "&" + str1
+	}
+
+	encoded := percentEncodeAll(str3)
+
+	signingKey := s.creds.AppSecret + "&"
+	mac := hmac.New(sha1.New, []byte(signingKey))
+	mac.Write([]byte(encoded))
 	rawSig := mac.Sum(nil)
 	signature = base64.StdEncoding.EncodeToString(rawSig)
 
-	return signature, canonicalString, nil
+	return signature, str3, nil
 }
 
-// ApplyHeaders attaches standard Webull OpenAPI authentication headers to an HTTP request.
+// ApplyHeaders attaches official Webull OpenAPI authentication headers to an HTTP request.
 func (s *Signer) ApplyHeaders(req *http.Request, body []byte, now time.Time) error {
 	if req == nil {
 		return errors.New("http.Request cannot be nil")
@@ -160,21 +194,23 @@ func (s *Signer) ApplyHeaders(req *http.Request, body []byte, now time.Time) err
 	}
 
 	timestamp := FormatTimestamp(now)
-	sig, _, err := s.Sign(req.Method, req.URL.Path, req.URL.Query(), body, timestamp, nonce)
+	sig, _, err := s.Sign(req.URL.Host, req.URL.Path, req.URL.Query(), body, timestamp, nonce)
 	if err != nil {
 		return fmt.Errorf("failed to compute OpenAPI signature: %w", err)
 	}
 
-	req.Header.Set("App-Key", s.creds.AppKey)
-	req.Header.Set("Timestamp", timestamp)
-	req.Header.Set("Nonce", nonce)
-	req.Header.Set("Signature", sig)
-	req.Header.Set("Signature-Method", "HMAC-SHA256")
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("x-app-key", s.creds.AppKey)
+	req.Header.Set("x-timestamp", timestamp)
+	req.Header.Set("x-signature", sig)
+	req.Header.Set("x-signature-algorithm", SignatureAlgorithm)
+	req.Header.Set("x-signature-version", SignatureVersion)
+	req.Header.Set("x-signature-nonce", nonce)
+	req.Header.Set("x-version", APIVersion)
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	if s.creds.AccountID != "" {
-		req.Header.Set("Account-Id", s.creds.AccountID)
+	if s.creds.AccessToken != "" {
+		req.Header.Set("x-access-token", s.creds.AccessToken)
 	}
 
 	return nil

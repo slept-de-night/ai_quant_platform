@@ -11,15 +11,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
+from ..core.metrics import metrics
 from ..core.models import (
-    OrderIntent,
-    PortfolioState,
-    Regime,
-    RiskDecision,
-    Side,
-    Signal,
-    StrategySpec,
-    StrategyStatus,
+	OrderIntent,
+	PortfolioState,
+	Regime,
+	RiskDecision,
+	Side,
+	Signal,
+	StrategySpec,
+	StrategyStatus,
 )
 from ..core.registry import Registry
 from ..data.market_data import alpaca_daily_bars, get_market_bars, synthetic_bars
@@ -1149,6 +1150,17 @@ def get_architecture_spec():
             },
         ],
     }
+
+
+@app.get("/api/v1/metrics")
+@app.get("/metrics")
+def get_platform_metrics():
+    """Returns platform operational metrics and agent runtime diagnostics."""
+    mem = AgentMemoryStore(settings.db_path, settings.agent_memory_dir)
+    notes = mem.list_notes(limit=1000)
+    snap = metrics.snapshot()
+    snap["memory_notes_total"] = len(notes)
+    return snap
 
 
 # ---------------------------------------------------------

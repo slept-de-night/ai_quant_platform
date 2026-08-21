@@ -12,6 +12,7 @@ import (
 
 	"aq-engine-go/broker"
 	"aq-engine-go/market"
+	"aq-engine-go/metrics"
 	"aq-engine-go/models"
 	"aq-engine-go/oms"
 	"aq-engine-go/reconciliation"
@@ -113,15 +114,27 @@ func main() {
 	}
 
 	mux := setupRouter(engine, brokerReg, gateway)
+	handler := metrics.DefaultRegistry.Middleware(mux)
 
 	log.Printf("Starting Go High-Performance Execution Engine on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
 
 func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market.Gateway) *http.ServeMux {
 	mux := http.NewServeMux()
+
+	// 0. Observability & Operational Metrics
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		w.Write([]byte(metrics.DefaultRegistry.PrometheusFormat()))
+	})
+
+	mux.HandleFunc("GET /api/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(metrics.DefaultRegistry.Snapshot())
+	})
 
 	// 1. Health & Diagnostics
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +310,7 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 		}
 
 		diff := reconciler.Reconcile(localState, *brokerSnapshot)
+		metrics.DefaultRegistry.AddReconciliationDiscrepancies(uint64(diff.TotalCount))
 		if diff.HasCritical {
 			engine.Freeze()
 			log.Printf("[RECONCILIATION ALERT] Critical discrepancy detected. OMS frozen in FROZEN_RECONCILIATION (%d discrepancies)", diff.TotalCount)

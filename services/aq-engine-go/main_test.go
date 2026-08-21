@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"aq-engine-go/broker"
@@ -215,6 +216,39 @@ func TestHTTPBrokersHealthAndSwitch(t *testing.T) {
 	active, err := brokerReg.GetActive()
 	if err != nil || active.Name() != "alpaca-paper" {
 		t.Fatalf("Expected active broker to switch to alpaca-paper, got %v", active)
+	}
+}
+
+func TestHTTPMetricsEndpoints(t *testing.T) {
+	mux, _, _ := setupTestServer()
+
+	// 1. GET /metrics (Prometheus text)
+	promReq := httptest.NewRequest("GET", "/metrics", nil)
+	promW := httptest.NewRecorder()
+	mux.ServeHTTP(promW, promReq)
+
+	if promW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 from /metrics, got %d", promW.Code)
+	}
+	promBody := promW.Body.String()
+	if !strings.Contains(promBody, "aq_engine_uptime_seconds") {
+		t.Fatalf("Expected Prometheus output to contain aq_engine_uptime_seconds: %s", promBody)
+	}
+
+	// 2. GET /api/v1/metrics (JSON)
+	jsonReq := httptest.NewRequest("GET", "/api/v1/metrics", nil)
+	jsonW := httptest.NewRecorder()
+	mux.ServeHTTP(jsonW, jsonReq)
+
+	if jsonW.Code != http.StatusOK {
+		t.Fatalf("Expected 200 from /api/v1/metrics, got %d", jsonW.Code)
+	}
+	var snap map[string]interface{}
+	if err := json.NewDecoder(jsonW.Body).Decode(&snap); err != nil {
+		t.Fatalf("Failed to decode JSON metrics: %v", err)
+	}
+	if _, ok := snap["uptime_seconds"]; !ok {
+		t.Fatalf("Expected uptime_seconds in JSON snapshot")
 	}
 }
 

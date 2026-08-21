@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"aq-engine-go/broker"
+	"aq-engine-go/metrics"
 	"aq-engine-go/models"
 	"aq-engine-go/reconciliation"
 )
@@ -62,6 +63,7 @@ func (e *Engine) Freeze() {
 	defer e.mu.Unlock()
 	e.isFrozen = true
 	e.portfolio.IsFrozen = true
+	metrics.DefaultRegistry.IncEngineFreeze()
 	_ = e.journal.RecordEvent(EventEngineFrozen, nil, nil, "", "", "")
 }
 
@@ -244,6 +246,7 @@ func (e *Engine) ApplyFill(fill models.Fill) (*models.Position, error) {
 		e.portfolio.PeakEquity = e.portfolio.Equity
 	}
 
+	metrics.DefaultRegistry.IncFillsProcessed()
 	_ = e.journal.RecordEvent(EventFillRecorded, nil, &fill, fill.ClientOrderID, fill.BrokerOrderID, "")
 	return &pos, nil
 }
@@ -433,6 +436,7 @@ func (e *Engine) ReserveOrder(order *models.OrderIntent) (*models.OrderIntent, m
 	ordCopy := *order
 	if len(reasons) > 0 {
 		ordCopy.Status = models.OrderStatusRejected
+		metrics.DefaultRegistry.IncOrdersRejected()
 		return nil, models.RiskDecision{
 			Approved: false,
 			Order:    &ordCopy,
@@ -619,6 +623,7 @@ func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*bro
 		brokerOrderID = resp.ID
 	}
 	e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, models.OrderStatusAcknowledged, brokerOrderID)
+	metrics.DefaultRegistry.IncOrdersSubmitted()
 	return resp, decision, nil
 }
 

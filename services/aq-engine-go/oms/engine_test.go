@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1596,6 +1597,89 @@ func TestCancelAllOpenOrders_CancelsAllInFlight(t *testing.T) {
 		t.Fatalf("Expected 3 broker CancelOrder calls, got %d", mb.cancelCalls)
 	}
 }
+
+// 21. Test: HydrateFromBroker synchronizes authoritative balances and positions
+func TestHydrateFromBroker_SynchronizesBalancesAndMarks(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	engine := NewEngine(100000.0, cfg)
+
+	account := &broker.AccountState{
+		Cash:   150000.0,
+		Equity: 180000.0,
+	}
+	positions := []broker.BrokerPosition{
+		{
+			Symbol:      "AAPL",
+			Qty:         100,
+			MarketValue: 30000.0,
+			CostBasis:   25000.0,
+		},
+	}
+
+	engine.HydrateFromBroker(account, positions, "authoritative_broker_feed")
+
+	p := engine.GetPortfolio("AAPL")
+	if p.Cash != 150000.0 {
+		t.Fatalf("Expected cash $150,000, got %.2f", p.Cash)
+	}
+	if p.Equity != 180000.0 {
+		t.Fatalf("Expected equity $180,000, got %.2f", p.Equity)
+	}
+	if p.GrossExposure != 30000.0 {
+		t.Fatalf("Expected gross exposure $30,000, got %.2f", p.GrossExposure)
+	}
+	if p.CurrentSymbolQty != 100 {
+		t.Fatalf("Expected AAPL qty 100, got %.2f", p.CurrentSymbolQty)
+	}
+	if p.HydratedSource != "authoritative_broker_feed" {
+		t.Fatalf("Expected source authoritative_broker_feed, got %s", p.HydratedSource)
+	}
+	if p.HydratedAt == nil {
+		t.Fatalf("Expected non-nil HydratedAt timestamp")
+	}
+}
+
+// 22. Test: Daily loss circuit breaker audited against Start-of-Day baseline
+func TestDailyLossCircuitBreaker_AuditedAgainstStartOfDayEquity(t *testing.T) {
+	cfg := models.DefaultRiskConfig()
+	cfg.MaxDailyLossPct = 0.02 // 2% daily loss limit
+	engine := NewEngine(100000.0, cfg)
+
+	// Set Start-of-Day baseline = $100,000
+	engine.SetStartOfDayEquity(100000.0)
+
+	// Simulate drawdown down to $97,000 (3% loss > 2% max limit)
+	account := &broker.AccountState{
+		Cash:   97000.0,
+		Equity: 97000.0,
+	}
+	engine.HydrateFromBroker(account, nil, "broker_snapshot")
+
+	ord := &models.OrderIntent{
+		Symbol:         "MSFT",
+		Side:           models.SideBuy,
+		Qty:            5,
+		ReferencePrice: 300.0,
+		ClientOrderID:  "daily-loss-check-1",
+	}
+
+	dec := engine.CheckRisk(ord)
+	if dec.Approved {
+		t.Fatalf("Order must be REJECTED when daily loss (3.0%%) breaches max daily loss limit (2.0%%)")
+	}
+
+	foundDailyLossReason := false
+	for _, r := range dec.Reasons {
+		if strings.Contains(r, "Daily loss limit breached") {
+			foundDailyLossReason = true
+			break
+		}
+	}
+	if !foundDailyLossReason {
+		t.Fatalf("Expected daily loss breach reason code, got: %v", dec.Reasons)
+	}
+}
+
 
 
 

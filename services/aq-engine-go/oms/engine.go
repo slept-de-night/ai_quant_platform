@@ -27,6 +27,10 @@ type Engine struct {
 	positions          map[string]models.Position // confirmed fill position projection
 	dailyOrders        int
 	lastResetDay       string
+	startOfDayEquity   float64
+	realizedDailyPnL   float64
+	hydratedAt         *time.Time
+	hydratedSource     string
 	isFrozen           bool
 	freezeReason       string
 	frozenAt           *time.Time
@@ -47,6 +51,9 @@ func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
 			Cash:                  initialEquity,
 			GrossExposure:         0,
 			DailyPnL:              0,
+			StartOfDayEquity:      initialEquity,
+			RealizedDailyPnL:      0,
+			UnrealizedDailyPnL:    0,
 			PeakEquity:            initialEquity,
 			CurrentSymbolExposure: 0,
 			CurrentSymbolQty:      0,
@@ -60,6 +67,8 @@ func NewEngine(initialEquity float64, cfg models.RiskConfig) *Engine {
 		fillList:           make([]models.Fill, 0),
 		positions:          make(map[string]models.Position),
 		lastResetDay:       time.Now().UTC().Format("2006-01-02"),
+		startOfDayEquity:   initialEquity,
+		realizedDailyPnL:   0,
 		isFrozen:           false,
 		journalReady:       true,
 		requireGatewayTick: false,
@@ -249,6 +258,12 @@ func (e *Engine) GetPortfolio(symbol string) models.PortfolioState {
 	p := e.portfolio
 	p.OrdersToday = e.dailyOrders
 	p.IsFrozen = e.isFrozen
+	p.StartOfDayEquity = e.startOfDayEquity
+	p.RealizedDailyPnL = e.realizedDailyPnL
+	p.DailyPnL = e.portfolio.Equity - e.startOfDayEquity
+	p.UnrealizedDailyPnL = p.DailyPnL - e.realizedDailyPnL
+	p.HydratedAt = e.hydratedAt
+	p.HydratedSource = e.hydratedSource
 
 	resCash, resBuyNotional, resGross, resSymExp, resSellQty := e.computeActiveReservationsLocked(symbol)
 	p.ReservedCash = resCash
@@ -264,6 +279,107 @@ func (e *Engine) GetPortfolio(symbol string) models.PortfolioState {
 		}
 	}
 	return p
+}
+
+// HydrateFromBroker synchronizes the local OMS portfolio with authoritative account and position balances from the broker.
+func (e *Engine) HydrateFromBroker(account *broker.AccountState, brokerPositions []broker.BrokerPosition, source string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if account == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	e.hydratedAt = &now
+	e.hydratedSource = source
+
+	e.portfolio.Cash = account.Cash
+	if account.Equity > 0 {
+		e.portfolio.Equity = account.Equity
+	}
+
+	if brokerPositions != nil {
+		newPositions := make(map[string]models.Position)
+		var totalGross float64
+		var totalPosVal float64
+		for _, bp := range brokerPositions {
+			p := models.Position{
+				Symbol:      bp.Symbol,
+				Qty:         bp.Qty,
+				MarketValue: bp.MarketValue,
+				CostBasis:   bp.CostBasis,
+			}
+			newPositions[bp.Symbol] = p
+			totalGross += math.Abs(p.MarketValue)
+			totalPosVal += p.MarketValue
+		}
+		e.positions = newPositions
+		e.portfolio.GrossExposure = totalGross
+		if account.Equity <= 0 {
+			e.portfolio.Equity = e.portfolio.Cash + totalPosVal
+		}
+	}
+
+	if e.startOfDayEquity <= 0 {
+		e.startOfDayEquity = e.portfolio.Equity
+	}
+
+	e.portfolio.StartOfDayEquity = e.startOfDayEquity
+	e.portfolio.DailyPnL = e.portfolio.Equity - e.startOfDayEquity
+	e.portfolio.RealizedDailyPnL = e.realizedDailyPnL
+	e.portfolio.UnrealizedDailyPnL = e.portfolio.DailyPnL - e.realizedDailyPnL
+	e.portfolio.HydratedAt = e.hydratedAt
+	e.portfolio.HydratedSource = e.hydratedSource
+
+	if e.portfolio.Equity > e.portfolio.PeakEquity {
+		e.portfolio.PeakEquity = e.portfolio.Equity
+	}
+}
+
+// SetStartOfDayEquity manually overrides or initializes the Start-of-Day baseline equity for auditing.
+func (e *Engine) SetStartOfDayEquity(sod float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.startOfDayEquity = sod
+	e.portfolio.StartOfDayEquity = sod
+	e.portfolio.DailyPnL = e.portfolio.Equity - sod
+	e.portfolio.UnrealizedDailyPnL = e.portfolio.DailyPnL - e.realizedDailyPnL
+}
+
+// RecalculateMarkToMarket updates position valuations and unrealized PnL using authoritative gateway ticks.
+func (e *Engine) RecalculateMarkToMarket() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.gateway == nil {
+		return
+	}
+
+	var totalGross float64
+	var totalPosVal float64
+	for sym, pos := range e.positions {
+		if tick, ok := e.gateway.GetLatestTick(sym); ok && tick.Price > 0 {
+			pos.MarketValue = pos.Qty * tick.Price
+			e.positions[sym] = pos
+		}
+		totalGross += math.Abs(pos.MarketValue)
+		totalPosVal += pos.MarketValue
+	}
+
+	e.portfolio.GrossExposure = totalGross
+	e.portfolio.Equity = e.portfolio.Cash + totalPosVal
+	if e.startOfDayEquity <= 0 {
+		e.startOfDayEquity = e.portfolio.Equity
+	}
+	e.portfolio.DailyPnL = e.portfolio.Equity - e.startOfDayEquity
+	e.portfolio.RealizedDailyPnL = e.realizedDailyPnL
+	e.portfolio.UnrealizedDailyPnL = e.portfolio.DailyPnL - e.realizedDailyPnL
+	e.portfolio.StartOfDayEquity = e.startOfDayEquity
+
+	if e.portfolio.Equity > e.portfolio.PeakEquity {
+		e.portfolio.PeakEquity = e.portfolio.Equity
+	}
 }
 
 func (e *Engine) GetOrderHistory() []models.OrderIntent {
@@ -605,9 +721,16 @@ func (e *Engine) evaluateRiskRules(p models.PortfolioState, dailyOrders int, ord
 		order.ReferencePrice = refPrice
 	}
 
-	// 5. Daily Loss Limit Circuit Breaker
-	if p.DailyPnL < 0 && math.Abs(p.DailyPnL) > e.config.MaxDailyLossPct*p.Equity {
-		reasons = append(reasons, fmt.Sprintf("Daily loss limit breached: %.2f%% > %.2f%%", math.Abs(p.DailyPnL)/p.Equity*100, e.config.MaxDailyLossPct*100))
+	// 5. Daily Loss Limit Circuit Breaker (audited against Start-of-Day Equity baseline)
+	sodEquity := e.startOfDayEquity
+	if sodEquity <= 0 {
+		sodEquity = p.Equity
+	}
+	if p.DailyPnL < 0 && sodEquity > 0 {
+		lossPct := math.Abs(p.DailyPnL) / sodEquity
+		if lossPct > e.config.MaxDailyLossPct {
+			reasons = append(reasons, fmt.Sprintf("Daily loss limit breached: %.2f%% loss ($%.2f / SOD $%.2f) exceeds max allowed %.2f%%", lossPct*100, math.Abs(p.DailyPnL), sodEquity, e.config.MaxDailyLossPct*100))
+		}
 	}
 
 	// 6. Drawdown Limit Circuit Breaker

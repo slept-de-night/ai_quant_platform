@@ -77,20 +77,25 @@ type Position struct {
 
 
 type PortfolioState struct {
-	Equity                 float64 `json:"equity"`
-	Cash                   float64 `json:"cash"`
-	GrossExposure          float64 `json:"gross_exposure"`
-	DailyPnL               float64 `json:"daily_pnl"`
-	PeakEquity             float64 `json:"peak_equity"`
-	CurrentSymbolExposure  float64 `json:"current_symbol_exposure"`
-	CurrentSymbolQty       float64 `json:"current_symbol_qty"`
-	ReservedCash           float64 `json:"reserved_cash"`
-	ReservedBuyNotional    float64 `json:"reserved_buy_notional"`
-	ReservedSellQty        float64 `json:"reserved_sell_qty"`
-	ReservedSymbolExposure float64 `json:"reserved_symbol_exposure"`
-	ReservedGrossExposure  float64 `json:"reserved_gross_exposure"`
-	OrdersToday            int     `json:"orders_today"`
-	IsFrozen               bool    `json:"is_frozen"`
+	Equity                 float64    `json:"equity"`
+	Cash                   float64    `json:"cash"`
+	GrossExposure          float64    `json:"gross_exposure"`
+	DailyPnL               float64    `json:"daily_pnl"`
+	StartOfDayEquity       float64    `json:"start_of_day_equity"`
+	RealizedDailyPnL       float64    `json:"realized_daily_pnl"`
+	UnrealizedDailyPnL     float64    `json:"unrealized_daily_pnl"`
+	PeakEquity             float64    `json:"peak_equity"`
+	CurrentSymbolExposure  float64    `json:"current_symbol_exposure"`
+	CurrentSymbolQty       float64    `json:"current_symbol_qty"`
+	ReservedCash           float64    `json:"reserved_cash"`
+	ReservedBuyNotional    float64    `json:"reserved_buy_notional"`
+	ReservedSellQty        float64    `json:"reserved_sell_qty"`
+	ReservedSymbolExposure float64    `json:"reserved_symbol_exposure"`
+	ReservedGrossExposure  float64    `json:"reserved_gross_exposure"`
+	OrdersToday            int        `json:"orders_today"`
+	IsFrozen               bool       `json:"is_frozen"`
+	HydratedAt             *time.Time `json:"hydrated_at,omitempty"`
+	HydratedSource         string     `json:"hydrated_source,omitempty"`
 }
 
 type RiskDecision struct {

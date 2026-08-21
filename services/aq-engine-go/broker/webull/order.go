@@ -94,7 +94,7 @@ func SubmitSandboxOrder(ctx context.Context, client *Client, accountID string, e
 		return nil, fmt.Errorf("failed to marshal order request: %w", err)
 	}
 
-	code, respBody, err := client.Execute(ctx, "POST", EndpointOrderPlace, nil, body)
+	code, respBody, err := client.ExecuteNoRetry(ctx, "POST", EndpointOrderPlace, nil, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to submit sandbox order (HTTP %d): %w", code, err)
 	}
@@ -150,7 +150,7 @@ func CancelSandboxOrder(ctx context.Context, client *Client, accountID string, e
 		return fmt.Errorf("failed to marshal cancel request: %w", err)
 	}
 
-	code, respBody, err := client.Execute(ctx, "POST", EndpointOrderCancel, nil, body)
+	code, respBody, err := client.ExecuteNoRetry(ctx, "POST", EndpointOrderCancel, nil, body)
 	if err != nil {
 		return fmt.Errorf("failed to cancel sandbox order (HTTP %d): %w", code, err)
 	}

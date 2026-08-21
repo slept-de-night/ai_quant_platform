@@ -202,7 +202,7 @@ func TestFetchBrokerSnapshot_ConstructsReconciliationBrokerState(t *testing.T) {
 			w.Write([]byte(`[{"symbol":"MSFT","quantity":"50","market_value":"20000.00","cost_basis":"18000.00"}]`))
 		case "/trading/orders/open-orders/list":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`[{"order_id":"ord_1","client_order_id":"c1","symbol":"MSFT","side":"BUY","total_quantity":"50","filled_quantity":"50","avg_price":"360.0","status":"FILLED"}]`))
+			w.Write([]byte(`[{"order_id":"ord_1","client_order_id":"c1","symbol":"MSFT","side":"BUY","total_quantity":"50","filled_quantity":"50","avg_price":"360.0","status":"FILLED","create_time":"2026-08-21T10:00:00Z","update_time":"2026-08-21T10:00:00Z"}]`))
 		default:
 			http.NotFound(w, r)
 		}

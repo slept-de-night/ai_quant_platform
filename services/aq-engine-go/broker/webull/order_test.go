@@ -160,7 +160,10 @@ func TestQuerySandboxOrder_FoundAndAbsent(t *testing.T) {
 				"side": "BUY",
 				"total_quantity": "50",
 				"filled_quantity": "50",
-				"status": "FILLED"
+				"avg_price": "300.00",
+				"status": "FILLED",
+				"create_time": "2026-08-21T10:00:00Z",
+				"update_time": "2026-08-21T10:00:00Z"
 			}
 		]`))
 	}))

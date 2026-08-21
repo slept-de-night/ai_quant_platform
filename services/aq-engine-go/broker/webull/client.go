@@ -168,14 +168,48 @@ func (c *Client) RedactLogMessage(msg string) string {
 	return redacted
 }
 
-// Execute performs an authenticated HTTP request against Webull OpenAPI with retries and backoff.
+// doAttempt performs a single signed HTTP request attempt. It returns the
+// HTTP status, response body, and a classified error. Transport errors that
+// are ambiguous (timeout/disconnect without a definitive broker rejection) are
+// wrapped in ErrAmbiguousTransport so callers can decide whether to retry.
+func (c *Client) doAttempt(ctx context.Context, method, path string, query url.Values, body []byte) (*http.Response, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, path, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if err := c.signer.ApplyHeaders(req, body, time.Now().UTC()); err != nil {
+		return nil, nil, fmt.Errorf("failed to sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return nil, nil, fmt.Errorf("%w: %v", ErrAmbiguousTransport, err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, nil, fmt.Errorf("%w: %v", ErrAmbiguousTransport, err)
+		}
+		return nil, nil, err
+	}
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		return resp, nil, fmt.Errorf("failed to read response body: %w", readErr)
+	}
+	return resp, respBody, nil
+}
+
+// Execute performs a read-safe authenticated HTTP request with bounded retries.
+// It may be used for idempotent reads (GET balances/positions/orders, market
+// snapshot) but must NEVER be used for economic writes.
 func (c *Client) Execute(ctx context.Context, method, path string, query url.Values, body []byte) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	// Rate limiter gate
-	if !c.rateLimiter.Allow() {
+	if c.rateLimiter != nil && !c.rateLimiter.Allow() {
 		return 0, nil, ErrRateLimitExceeded
 	}
 
@@ -189,7 +223,6 @@ func (c *Client) Execute(ctx context.Context, method, path string, query url.Val
 
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff with jitter
 			jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
 			sleepDuration := backoff + jitter
 			select {
@@ -203,62 +236,81 @@ func (c *Client) Execute(ctx context.Context, method, path string, query url.Val
 			}
 		}
 
-		req, err := http.NewRequestWithContext(ctx, method, fullURL, bytes.NewReader(body))
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to create request: %w", err)
-		}
-
-		// Apply HMAC-SHA256 signature and OpenAPI headers
-		if err := c.signer.ApplyHeaders(req, body, time.Now().UTC()); err != nil {
-			return 0, nil, fmt.Errorf("failed to sign request: %w", err)
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			// Classify network/transport errors
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				lastErr = fmt.Errorf("%w: %v", ErrAmbiguousTransport, err)
-			} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				lastErr = fmt.Errorf("%w: %v", ErrAmbiguousTransport, err)
-			} else {
-				lastErr = err
-			}
-
-			log.Printf("[WEBULL HTTP ERROR] %s", c.RedactLogMessage(fmt.Sprintf("%s %s (attempt %d/%d) transport error: %v", method, path, attempt+1, c.maxRetries+1, err)))
+		resp, respBody, e := c.doAttempt(ctx, method, fullURL, query, body)
+		if e != nil {
+			lastErr = e
+			log.Printf("[WEBULL HTTP ERROR] %s", c.RedactLogMessage(fmt.Sprintf("%s %s (attempt %d/%d) transport error: %v", method, path, attempt+1, c.maxRetries+1, e)))
 			continue
 		}
 
-		respBody, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", readErr)
-			continue
-		}
-
-		// Handle HTTP Status Codes
 		switch {
 		case resp.StatusCode >= 200 && resp.StatusCode < 300:
 			return resp.StatusCode, respBody, nil
 
-		case resp.StatusCode == http.StatusTooManyRequests: // 429
+		case resp.StatusCode == http.StatusTooManyRequests:
 			lastErr = fmt.Errorf("%w: response=%s", ErrRateLimitExceeded, string(respBody))
 			log.Printf("[WEBULL RATE LIMIT 429] %s (attempt %d/%d)", c.RedactLogMessage(fmt.Sprintf("%s %s", method, path)), attempt+1, c.maxRetries+1)
 			continue
 
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden: // 401, 403
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 			return resp.StatusCode, respBody, fmt.Errorf("%w (HTTP %d): %s", ErrAuthenticationFail, resp.StatusCode, string(respBody))
 
-		case resp.StatusCode >= 500 && resp.StatusCode < 600: // 5xx Server errors
+		case resp.StatusCode >= 500 && resp.StatusCode < 600:
 			lastErr = fmt.Errorf("%w (HTTP %d): response=%s", ErrServerUnavailable, resp.StatusCode, string(respBody))
 			log.Printf("[WEBULL SERVER ERROR 5XX] %s (HTTP %d, attempt %d/%d)", c.RedactLogMessage(fmt.Sprintf("%s %s", method, path)), resp.StatusCode, attempt+1, c.maxRetries+1)
 			continue
 
-		default: // 4xx client errors (400, 404, 422, etc.) -> Fail immediately without retry
+		default:
 			return resp.StatusCode, respBody, fmt.Errorf("webull api client error (HTTP %d): %s", resp.StatusCode, string(respBody))
 		}
 	}
 
 	return 0, nil, fmt.Errorf("webull request failed after %d retries: %w", c.maxRetries, lastErr)
+}
+
+// ExecuteNoRetry performs a single-attempt authenticated HTTP request with NO
+// automatic retry. This is required for economic writes (place/cancel/replace)
+// where an automatic retry after an ambiguous transport failure could duplicate
+// a broker event. Transport ambiguity surfaces as ErrAmbiguousTransport so the
+// OMS can mark the submission SUBMISSION_UNKNOWN and reconcile via order detail.
+func (c *Client) ExecuteNoRetry(ctx context.Context, method, path string, query url.Values, body []byte) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if c.rateLimiter != nil && !c.rateLimiter.Allow() {
+		return 0, nil, ErrRateLimitExceeded
+	}
+
+	fullURL := c.baseURL + path
+	if len(query) > 0 {
+		fullURL += "?" + query.Encode()
+	}
+
+	resp, respBody, e := c.doAttempt(ctx, method, fullURL, query, body)
+	if e != nil {
+		return 0, nil, e
+	}
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return resp.StatusCode, respBody, nil
+
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return resp.StatusCode, respBody, fmt.Errorf("%w (HTTP %d): %s", ErrAuthenticationFail, resp.StatusCode, string(respBody))
+
+	case resp.StatusCode >= 500 && resp.StatusCode < 600:
+		return resp.StatusCode, respBody, fmt.Errorf("%w (HTTP %d): response=%s", ErrServerUnavailable, resp.StatusCode, string(respBody))
+
+	default:
+		return resp.StatusCode, respBody, fmt.Errorf("webull api client error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+}
+
+// ExecuteRead is a semantic alias for Execute: a read-only, idempotent, safely
+// retryable request. Prefer this name at read call sites for clarity.
+func (c *Client) ExecuteRead(ctx context.Context, path string, query url.Values) (int, []byte, error) {
+	return c.Execute(ctx, "GET", path, query, nil)
 }
 
 // Error classification predicates

@@ -592,6 +592,7 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 	})
 
 	// 9. Emergency Global Kill Switch (EMERGENCY_KILL: Freeze + Cancel-All Open Orders + Reconcile)
+	// Response reflects broker truth; the engine always remains frozen.
 	mux.HandleFunc("POST /api/v1/risk/kill", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Reason      string `json:"reason"`
@@ -605,36 +606,68 @@ func setupRouter(engine *oms.Engine, brokerReg *broker.Registry, gateway *market
 			req.RequestedBy = "operator"
 		}
 
-		// 1. Freeze new submissions immediately
+		// 1. Freeze new submissions immediately (always, regardless of downstream failures)
 		engine.FreezeWithReason(req.Reason, req.RequestedBy, "")
 
-		// 2. Query active broker and request cancellation on all open orders
+		// 2. Query active broker and request cancellation on all open orders.
+		//    Track whether cancellation was fully requested, partially failed, or skipped.
+		killStatus := "FROZEN"
 		var canceledOrders []models.OrderIntent
+		var cancelErrMsg string
 		activeBroker, err := brokerReg.GetActive()
 		if err == nil && activeBroker != nil {
-			canceledOrders, _ = engine.CancelAllOpenOrders(activeBroker, "emergency kill cancel-all")
+			cids, cancelErr := engine.CancelAllOpenOrders(activeBroker, "emergency kill cancel-all")
+			if cancelErr != nil {
+				cancelErrMsg = cancelErr.Error()
+				killStatus = "CANCEL_PARTIAL_FAILURE"
+			} else {
+				killStatus = "CANCEL_REQUESTED"
+			}
+			canceledOrders = cids
+		} else if err != nil || activeBroker == nil {
+			cancelErrMsg = "no active broker configured; cancellation not dispatched"
+			killStatus = "CANCEL_PARTIAL_FAILURE"
 		}
 
-		// 3. Trigger immediate post-kill reconciliation
+		// 3. Trigger immediate post-kill reconciliation.
 		var reconDiff *reconciliation.Diff
+		var reconFailed bool
 		if activeBroker != nil {
 			brokerSnapshot, snapErr := activeBroker.GetBrokerSnapshot()
 			if snapErr == nil && brokerSnapshot != nil {
 				localSnapshot := engine.ConstructLocalSnapshot()
 				diff := reconciler.Reconcile(localSnapshot, *brokerSnapshot)
 				reconDiff = &diff
+				reconciler.RecordRun(activeBroker.Name(), diff)
+				if diff.HasCritical {
+					killStatus = "RECONCILIATION_MISMATCH"
+				} else if killStatus != "CANCEL_PARTIAL_FAILURE" {
+					killStatus = "KILL_VERIFIED"
+				}
+			} else {
+				reconFailed = true
+				killStatus = "RECONCILIATION_FAILED"
 			}
 		}
 
+		msg := fmt.Sprintf("Emergency Kill Switch ENGAGED (status=%s): new submissions blocked; engine FROZEN", killStatus)
+		if cancelErrMsg != "" {
+			msg += "; cancellation detail: " + cancelErrMsg
+		}
+		if reconFailed {
+			msg += "; post-kill reconciliation could not be completed"
+		}
+
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":                "killed",
+			"status":                killStatus,
 			"is_frozen":             true,
 			"reason":                req.Reason,
 			"canceled_orders_count": len(canceledOrders),
 			"canceled_orders":       canceledOrders,
 			"reconciliation":        reconDiff,
-			"message":               "Emergency Kill Switch ENGAGED: All new submissions blocked, open orders cancellation requested, and broker state reconciled",
+			"message":               msg,
 			"timestamp":             time.Now().UTC(),
 		})
 	})

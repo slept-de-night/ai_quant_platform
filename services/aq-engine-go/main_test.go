@@ -503,8 +503,12 @@ func TestHTTPFreezeAndEmergencyKill(t *testing.T) {
 
 	var killRes map[string]interface{}
 	json.NewDecoder(killW.Body).Decode(&killRes)
-	if killRes["status"] != "killed" || killRes["is_frozen"] != true {
-		t.Fatalf("Expected killed status and is_frozen=true, got: %v", killRes)
+	status := killRes["status"]
+	if status != "FROZEN" && status != "CANCEL_REQUESTED" && status != "CANCEL_PARTIAL_FAILURE" && status != "RECONCILIATION_FAILED" && status != "RECONCILIATION_MISMATCH" && status != "KILL_VERIFIED" {
+		t.Fatalf("Expected a broker-truth kill status, got: %v", killRes)
+	}
+	if killRes["is_frozen"] != true {
+		t.Fatalf("Expected is_frozen=true on kill, got: %v", killRes)
 	}
 }
 

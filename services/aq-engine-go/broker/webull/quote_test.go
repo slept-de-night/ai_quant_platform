@@ -96,6 +96,68 @@ func TestFetchQuote_StaleQuoteRejected(t *testing.T) {
 	}
 }
 
+// TestFetchQuote_MalformedPriceRejected verifies malformed authoritative price
+// fails closed instead of being coerced to zero.
+func TestFetchQuote_MalformedPriceRejected(t *testing.T) {
+	now := time.Now().UTC()
+	freshMs := int64(now.Unix()) * 1000
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`[{
+			"symbol": "AAPL",
+			"price": "bad_value",
+			"last_trade_time": "` + fmt.Sprintf("%d", freshMs) + `"
+		}]`))
+	}))
+	defer server.Close()
+
+	creds := Credentials{
+		AppKey:      "wb_key",
+		AppSecret:   "wb_secret",
+		Environment: EnvSandbox,
+	}
+
+	client, err := NewClient(creds, WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	_, err = FetchQuote(context.Background(), client, "AAPL", 60*time.Second)
+	if err == nil {
+		t.Fatalf("Expected error for malformed price, got none")
+	}
+}
+
+// TestFetchQuote_MissingTimestampRejected verifies a missing trade timestamp
+// fails closed rather than falling back to local time.
+func TestFetchQuote_MissingTimestampRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`[{
+			"symbol": "AAPL",
+			"price": "150.15",
+			"last_trade_time": ""
+		}]`))
+	}))
+	defer server.Close()
+
+	creds := Credentials{
+		AppKey:      "wb_key",
+		AppSecret:   "wb_secret",
+		Environment: EnvSandbox,
+	}
+
+	client, err := NewClient(creds, WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	_, err = FetchQuote(context.Background(), client, "AAPL", 60*time.Second)
+	if err == nil {
+		t.Fatalf("Expected error for missing authoritative timestamp, got none")
+	}
+}
+
 // TestValidateNBBODeviation_AcceptsWithinThreshold verifies that orders within 5% deviation pass sanity checks.
 func TestValidateNBBODeviation_AcceptsWithinThreshold(t *testing.T) {
 	quote := &WebullQuote{

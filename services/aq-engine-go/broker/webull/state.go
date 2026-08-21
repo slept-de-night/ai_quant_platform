@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strconv"
+	"strings"
 	"time"
 
 	"aq-engine-go/broker"
@@ -60,18 +60,6 @@ type WebullOrderItem struct {
 	UpdateTime      string `json:"update_time"`
 }
 
-// parseFloatSafe parses string numeric representation safely, defaulting to 0.0 on error.
-func parseFloatSafe(s string) float64 {
-	if s == "" {
-		return 0.0
-	}
-	val, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0.0
-	}
-	return val
-}
-
 // FetchAccount queries the Webull OpenAPI account endpoint and returns normalized AccountState.
 func FetchAccount(ctx context.Context, client *Client, accountID string) (*broker.AccountState, error) {
 	if client == nil {
@@ -93,18 +81,46 @@ func FetchAccount(ctx context.Context, client *Client, accountID string) (*broke
 		return nil, fmt.Errorf("failed to parse webull account response: %w", err)
 	}
 
-	cash := parseFloatSafe(raw.TotalCashBalance)
-	equity := parseFloatSafe(raw.TotalNetLiquidationValue)
+	cash, err := parseRequiredDecimal("total_cash_balance", raw.TotalCashBalance)
+	if err != nil {
+		return nil, err
+	}
+	equity, err := parseRequiredDecimal("total_net_liquidation_value", raw.TotalNetLiquidationValue)
+	if err != nil {
+		return nil, err
+	}
+
 	curr := raw.TotalAssetCurrency
 	if curr == "" {
 		curr = "USD"
 	}
 
-	bp := 0.0
+	var bp float64
+	bpSet := false
 	for _, asset := range raw.AccountCurrencyAssets {
-		if asset.Currency == "" || asset.Currency == curr {
-			bp = parseFloatSafe(asset.BuyingPower)
+		if asset.Currency == curr {
+			parsed, err := parseOptionalDecimal("buying_power", asset.BuyingPower)
+			if err != nil {
+				return nil, err
+			}
+			if parsed != nil {
+				bp, bpSet = *parsed, true
+			}
 			break
+		}
+	}
+	if !bpSet {
+		for _, asset := range raw.AccountCurrencyAssets {
+			if asset.Currency == "" {
+				parsed, err := parseOptionalDecimal("buying_power", asset.BuyingPower)
+				if err != nil {
+					return nil, err
+				}
+				if parsed != nil {
+					bp = *parsed
+				}
+				break
+			}
 		}
 	}
 
@@ -139,15 +155,24 @@ func FetchPositions(ctx context.Context, client *Client, accountID string) ([]br
 
 	positions := make([]broker.BrokerPosition, 0, len(rawItems))
 	for _, item := range rawItems {
-		qty := parseFloatSafe(item.Quantity)
-		mv := parseFloatSafe(item.MarketValue)
-		cost := parseFloatSafe(item.CostBasis)
+		qty, err := parseRequiredDecimal("quantity", item.Quantity)
+		if err != nil {
+			return nil, err
+		}
+		mv, err := parseOptionalDecimal("market_value", item.MarketValue)
+		if err != nil {
+			return nil, err
+		}
+		cost, err := parseOptionalDecimal("cost_basis", item.CostBasis)
+		if err != nil {
+			return nil, err
+		}
 
 		positions = append(positions, broker.BrokerPosition{
 			Symbol:      item.Symbol,
 			Qty:         qty,
-			MarketValue: mv,
-			CostBasis:   cost,
+			MarketValue: decimalOrFallback(mv, 0),
+			CostBasis:   decimalOrFallback(cost, 0),
 		})
 	}
 
@@ -177,20 +202,39 @@ func FetchOrders(ctx context.Context, client *Client, accountID string) ([]broke
 
 	orders := make([]broker.BrokerOrder, 0, len(rawItems))
 	for _, item := range rawItems {
-		totalQty := parseFloatSafe(item.TotalQty)
-		filledQty := parseFloatSafe(item.FilledQty)
-		avgPrice := parseFloatSafe(item.AvgPrice)
-		limitPrice := parseFloatSafe(item.LimitPrice)
-
-		normStatus := broker.NormalizeBrokerStatus(item.Status)
-
-		createdAt := time.Now().UTC()
-		if t, err := time.Parse(time.RFC3339, item.CreateTime); err == nil {
-			createdAt = t
+		totalQty, err := parseRequiredDecimal("total_quantity", item.TotalQty)
+		if err != nil {
+			return nil, err
 		}
-		updatedAt := createdAt
-		if t, err := time.Parse(time.RFC3339, item.UpdateTime); err == nil {
-			updatedAt = t
+		filledQty, err := parseRequiredDecimal("filled_quantity", item.FilledQty)
+		if err != nil {
+			return nil, err
+		}
+		avgPrice, err := parseOptionalDecimal("avg_price", item.AvgPrice)
+		if err != nil {
+			return nil, err
+		}
+		if filledQty > 0 && avgPrice == nil {
+			return nil, fmt.Errorf("webull order %s is filled but avg_price is absent", item.OrderID)
+		}
+		limitPrice, err := parseOptionalDecimal("limit_price", item.LimitPrice)
+		if err != nil {
+			return nil, err
+		}
+
+		status := strings.TrimSpace(item.Status)
+		if status == "" {
+			return nil, fmt.Errorf("webull order %s is missing status", item.OrderID)
+		}
+		normStatus := broker.NormalizeBrokerStatus(status)
+
+		createdAt, err := parseRequiredTimestamp("create_time", item.CreateTime)
+		if err != nil {
+			return nil, err
+		}
+		updatedAt, err := parseRequiredTimestamp("update_time", item.UpdateTime)
+		if err != nil {
+			return nil, err
 		}
 
 		orders = append(orders, broker.BrokerOrder{
@@ -203,9 +247,9 @@ func FetchOrders(ctx context.Context, client *Client, accountID string) ([]broke
 			RequestedQty:     totalQty,
 			FilledQty:        int(filledQty),
 			FilledQtyFloat:   filledQty,
-			AverageFillPrice: avgPrice,
-			AvgPrice:         avgPrice,
-			LimitPrice:       limitPrice,
+			AverageFillPrice: decimalOrFallback(avgPrice, 0),
+			AvgPrice:         decimalOrFallback(avgPrice, 0),
+			LimitPrice:       decimalOrFallback(limitPrice, 0),
 			Status:           normStatus,
 			RawStatus:        item.Status,
 			CreatedAt:        createdAt,
@@ -254,8 +298,8 @@ func FetchBrokerSnapshot(ctx context.Context, client *Client, accountID string) 
 			BrokerOrderID: o.BrokerOrderID,
 			Symbol:        o.Symbol,
 			Side:          o.Side,
-			RequestedQty:  o.Qty,
-			FilledQty:     o.FilledQty,
+			RequestedQty:  o.RequestedQty,
+			FilledQty:     o.FilledQtyFloat,
 			Status:        string(o.Status),
 			CreatedAt:     o.CreatedAt,
 			UpdatedAt:     o.UpdatedAt,

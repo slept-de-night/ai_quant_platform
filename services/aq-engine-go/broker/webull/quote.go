@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"time"
 
 	"aq-engine-go/market"
@@ -85,19 +84,26 @@ func FetchQuote(ctx context.Context, client *Client, symbol string, maxStaleness
 		return nil, fmt.Errorf("%w: symbol %s absent from snapshot list", ErrInvalidQuote, symbol)
 	}
 
-	bid := parseFloatSafe(raw.Bid)
-	ask := parseFloatSafe(raw.Ask)
-	last := parseFloatSafe(raw.Price)
-	vol := parseFloatSafe(raw.Volume)
+	bid, err := parseOptionalDecimal("bid", raw.Bid)
+	if err != nil {
+		return nil, err
+	}
+	ask, err := parseOptionalDecimal("ask", raw.Ask)
+	if err != nil {
+		return nil, err
+	}
+	last, err := parseRequiredDecimal("price", raw.Price)
+	if err != nil {
+		return nil, err
+	}
+	vol, err := parseOptionalDecimal("volume", raw.Volume)
+	if err != nil {
+		return nil, err
+	}
 
-	// Webull snapshot timestamps are milliseconds since Unix epoch; never fall back to local time.
-	ts := time.UnixMilli(0)
-	if raw.LastTradeTime != "" {
-		t, err := strconv.Atoi(raw.LastTradeTime)
-		if err != nil || t <= 0 {
-			return nil, fmt.Errorf("malformed authoritative quote timestamp for %s: %q", symbol, raw.LastTradeTime)
-		}
-		ts = time.UnixMilli(int64(t))
+	ts, err := parseRequiredTimestamp("last_trade_time", raw.LastTradeTime)
+	if err != nil {
+		return nil, err
 	}
 
 	// Staleness validation
@@ -105,20 +111,22 @@ func FetchQuote(ctx context.Context, client *Client, symbol string, maxStaleness
 		return nil, fmt.Errorf("%w: age %v > allowed %v", ErrStaleQuote, time.Since(ts).Round(time.Millisecond), maxStaleness)
 	}
 
-	if last <= 0 && (bid <= 0 || ask <= 0) {
+	bidV := decimalOrFallback(bid, 0)
+	askV := decimalOrFallback(ask, 0)
+	if last <= 0 && (bidV <= 0 || askV <= 0) {
 		return nil, ErrInvalidQuote
 	}
 
-	if last <= 0 && bid > 0 && ask > 0 {
-		last = (bid + ask) / 2.0
+	if last <= 0 && bidV > 0 && askV > 0 {
+		last = (bidV + askV) / 2.0
 	}
 
 	return &WebullQuote{
 		Symbol:    symbol,
-		BidPrice:  bid,
-		AskPrice:  ask,
+		BidPrice:  bidV,
+		AskPrice:  askV,
 		LastPrice: last,
-		Volume:    vol,
+		Volume:    decimalOrFallback(vol, 0),
 		Timestamp: ts,
 	}, nil
 }

@@ -32,8 +32,8 @@ type OrderState struct {
 	BrokerOrderID string    `json:"broker_order_id,omitempty"`
 	Symbol        string    `json:"symbol"`
 	Side          string    `json:"side"`
-	RequestedQty  int       `json:"requested_qty"`
-	FilledQty     int       `json:"filled_qty"`
+	RequestedQty  float64   `json:"requested_qty"`
+	FilledQty     float64   `json:"filled_qty"`
 	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`

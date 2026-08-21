@@ -1073,21 +1073,33 @@ func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*bro
 	resp, err := b.SubmitOrder(reserved)
 	if err == nil && resp != nil {
 		brokerOrderID := resp.ID
-		_ = e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, models.OrderStatusAcknowledged, brokerOrderID)
+		if jerr := e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, models.OrderStatusAcknowledged, brokerOrderID); jerr != nil {
+			// Broker may have accepted the order, but local durability failed.
+			// This is NOT "broker submit failed"; require reconciliation.
+			freezeReason := fmt.Sprintf("broker may have accepted order %s but local ACK journal failed (%v); reconciliation required", order.ClientOrderID, jerr)
+			e.FreezeWithReason(freezeReason, "oms_ack_journal_fail", "")
+			return nil, decision, fmt.Errorf("order submitted to broker but local durability failed (engine frozen): %w", jerr)
+		}
 		metrics.DefaultRegistry.IncOrdersSubmitted()
 		return resp, decision, nil
 	}
 
 	// SubmitOrder returned an error. Classify into Confirmed Rejection vs Ambiguous Transport Failure.
-	if !broker.IsAmbiguousTransportError(err) {
+if !broker.IsAmbiguousTransportError(err) {
 		// Confirmed rejection (e.g. 400 Bad Request, 422 Unprocessable, unconfigured)
-		_ = e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, err.Error())
+		if jerr := e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, err.Error()); jerr != nil {
+			e.FreezeWithReason(fmt.Sprintf("broker rejected order %s but local SUBMIT_FAILED journal failed (%v)", order.ClientOrderID, jerr), "oms_journal_fail", "")
+			return nil, decision, fmt.Errorf("broker rejected order and local journaling failed (engine frozen): %w", jerr)
+		}
 		return nil, decision, err
 	}
 
 	// Ambiguous transport failure (timeout, network drop, 5xx).
 	// 1. Mark status as SUBMISSION_UNKNOWN and durably journal
-	_ = e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmissionUnknown, fmt.Sprintf("ambiguous transport failure: %v", err))
+	if jerr := e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmissionUnknown, fmt.Sprintf("ambiguous transport failure: %v", err)); jerr != nil {
+		e.FreezeWithReason(fmt.Sprintf("ambiguous submit but SUBMISSION_UNKNOWN journaling failed for order %s (%v)", order.ClientOrderID, jerr), "oms_journal_fail", "")
+		return nil, decision, fmt.Errorf("ambiguous submission and local journaling failed (engine frozen): %w", jerr)
+	}
 
 	// 2. Bounded verification: query broker using the EXACT SAME client_order_id
 	queryResp, queryErr := b.GetOrder(order.ClientOrderID)
@@ -1106,14 +1118,20 @@ func (e *Engine) Submit(order *models.OrderIntent, b broker.BrokerAdapter) (*bro
 		default:
 			finalStatus = models.OrderStatusAcknowledged
 		}
-		_ = e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, finalStatus, queryResp.ID)
+		if jerr := e.UpdateOrderStatusAndBrokerID(order.ClientOrderID, finalStatus, queryResp.ID); jerr != nil {
+			e.FreezeWithReason(fmt.Sprintf("ambiguity resolution journaling failed for order %s (%v); reconciliation required", order.ClientOrderID, jerr), "oms_ambiguity_resolve_journal_fail", "")
+			return nil, decision, fmt.Errorf("ambiguous submission resolved but journaling failed (engine frozen): %w", jerr)
+		}
 		metrics.DefaultRegistry.IncOrdersSubmitted()
 		return queryResp, decision, nil
 	}
 
 	if broker.IsOrderNotFoundError(queryErr) {
 		// Subcase B: Order confirmed absent on broker
-		_ = e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, fmt.Sprintf("confirmed absent on broker after ambiguous submit failure (%v)", err))
+		if jerr := e.UpdateOrderStatus(order.ClientOrderID, models.OrderStatusSubmitFailed, fmt.Sprintf("confirmed absent on broker after ambiguous submit failure (%v)", err)); jerr != nil {
+			e.FreezeWithReason(fmt.Sprintf("confirmed-absent SUBMIT_FAILED journaling failed for order %s (%v)", order.ClientOrderID, jerr), "oms_journal_fail", "")
+			return nil, decision, fmt.Errorf("submit failed and journaling failed (engine frozen): %w", jerr)
+		}
 		return nil, decision, fmt.Errorf("submit failed (confirmed absent on broker): %w", err)
 	}
 
@@ -1137,8 +1155,8 @@ func (e *Engine) ConstructLocalSnapshot() reconciliation.LocalState {
 			BrokerOrderID: ord.BrokerOrderID,
 			Symbol:        ord.Symbol,
 			Side:          string(ord.Side),
-			RequestedQty:  ord.Qty,
-			FilledQty:     ord.FilledQty,
+			RequestedQty:  ord.RequestedQty,
+			FilledQty:     ord.FilledQtyFloat,
 			Status:        string(ord.Status),
 			CreatedAt:     ord.CreatedAt,
 			UpdatedAt:     ord.UpdatedAt,
@@ -1234,9 +1252,13 @@ func (e *Engine) RequestCancel(clientOrderID string, b broker.BrokerAdapter, rea
 			queryResp, queryErr := b.GetOrder(clientOrderID)
 			if queryErr == nil && queryResp != nil {
 				if queryResp.Status == broker.BrokerOrderStatusFilled {
-					_ = e.UpdateOrderStatus(clientOrderID, models.OrderStatusFilled, "broker confirmed filled prior to cancel")
+					if jerr := e.UpdateOrderStatus(clientOrderID, models.OrderStatusFilled, "broker confirmed filled prior to cancel"); jerr != nil {
+						return &ordCopy, fmt.Errorf("cancel recovery: broker confirmed filled but journaling failed (engine unchanged): %w", jerr)
+					}
 				} else if queryResp.Status == broker.BrokerOrderStatusCanceled {
-					_ = e.UpdateOrderStatus(clientOrderID, models.OrderStatusCancelled, "broker confirmed canceled")
+					if jerr := e.UpdateOrderStatus(clientOrderID, models.OrderStatusCancelled, "broker confirmed canceled"); jerr != nil {
+						return &ordCopy, fmt.Errorf("cancel recovery: broker confirmed canceled but journaling failed (engine unchanged): %w", jerr)
+					}
 				}
 			}
 			return &ordCopy, cancelErr

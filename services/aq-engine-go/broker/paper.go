@@ -52,6 +52,15 @@ func (p *PaperAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, err
 	now := time.Now().UTC()
 	brokerID := fmt.Sprintf("paper-%d", now.UnixNano())
 
+	reqQty := float64(order.Qty)
+	if order.RequestedQty > 0 {
+		reqQty = order.RequestedQty
+	}
+	fillQty := float64(order.Qty)
+	if order.FilledQty > 0 {
+		fillQty = float64(order.FilledQty)
+	}
+
 	bo := BrokerOrder{
 		ID:               brokerID,
 		BrokerOrderID:    brokerID,
@@ -59,9 +68,9 @@ func (p *PaperAdapter) SubmitOrder(order *models.OrderIntent) (*BrokerOrder, err
 		Symbol:           order.Symbol,
 		Side:             string(order.Side),
 		Qty:              order.Qty,
-		RequestedQty:     float64(order.Qty),
-		FilledQty:        order.Qty, // instantaneous simulated paper fill
-		FilledQtyFloat:   float64(order.Qty),
+		RequestedQty:     reqQty,
+		FilledQty:        int(fillQty), // instantaneous simulated paper fill
+		FilledQtyFloat:   fillQty,
 		Status:           BrokerOrderStatusFilled,
 		RawStatus:        "filled",
 		LimitPrice:       order.ReferencePrice,
@@ -186,8 +195,8 @@ func (p *PaperAdapter) GetBrokerSnapshot() (*reconciliation.BrokerState, error) 
 			BrokerOrderID: ord.ID,
 			Symbol:        ord.Symbol,
 			Side:          ord.Side,
-			RequestedQty:  ord.Qty,
-			FilledQty:     ord.FilledQty,
+			RequestedQty:  ord.RequestedQty,
+			FilledQty:     ord.FilledQtyFloat,
 			Status:        string(ord.Status),
 			CreatedAt:     ord.CreatedAt,
 			UpdatedAt:     ord.UpdatedAt,
